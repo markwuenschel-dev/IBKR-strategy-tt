@@ -6,12 +6,17 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
     "anthropic>=0.40",
+    # cli.py resolves ZoneInfo("America/New_York") at import time, so a host with
+    # no system tz database cannot even import the CLI without this. Declared
+    # unconditionally: the cost is a few hundred KB, and the alternative is a
+    # platform marker that leaves minimal Linux containers broken.
+    "tzdata",
 ]
 
 [project.optional-dependencies]
 # Only needed to talk to a real TWS / IB Gateway. The whole test suite,
 # including the mission test, runs without it.
-broker = ["ib_async>=1.0"]
+broker = ["ib_async>=2.0,<3"]
 dev = ["pytest>=8", "pytest-timeout>=2", "ruff>=0.5"]
 
 [project.scripts]
