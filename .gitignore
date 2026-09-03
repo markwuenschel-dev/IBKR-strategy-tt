@@ -11,3 +11,6 @@ dist/
 # Local runtime state and secrets
 trader.toml
 *.sqlite3
+
+# Coverage database
+.coverage
