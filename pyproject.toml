@@ -17,7 +17,11 @@ dependencies = [
 # Only needed to talk to a real TWS / IB Gateway. The whole test suite,
 # including the mission test, runs without it.
 broker = ["ib_async>=2.0,<3"]
-dev = ["pytest>=8", "pytest-timeout>=2", "ruff>=0.5"]
+# ruff is pinned exactly, not floored. A formatter's output changes between
+# releases, so a floating version makes `ruff format --check` a gate whose
+# result depends on the day it ran: 0.15.x formats only Python, 0.16.x also
+# formats Markdown, and the two disagree about this tree.
+dev = ["pytest>=8", "pytest-timeout>=2", "ruff==0.16.5"]
 
 [project.scripts]
 ibkr-trader = "ibkr_trader.cli:main"
@@ -39,6 +43,13 @@ timeout = 60
 [tool.ruff]
 line-length = 95
 target-version = "py311"
+
+[tool.ruff.format]
+# The Markdown code blocks in README.md and docs/ are illustrative pseudocode
+# -- `tastytrade.evaluate(...)`, `record(NO_TRADE)` -- with deliberately
+# aligned comments, not importable source. Ruff formats Markdown from 0.16
+# onward; exclude it rather than let the formatter rewrite documentation.
+exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "I", "UP", "B", "SIM", "RET", "ARG", "BLE"]
