@@ -1,0 +1,37 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format
+        run: ruff format --check .
+
+      # The mission test is a required gate. It runs the real production runner,
+      # takes time from an injected clock, and needs no network -- so it can
+      # never legitimately skip. `--strict-markers` plus an explicit skip check
+      # below stops it being quietly neutered.
+      - name: Mission test
+        run: |
+          python -m pytest tests/test_mission.py -v --no-header -rA \
+            | tee mission.log
+          if grep -qE "SKIPPED|no tests ran" mission.log; then
+            echo "::error::The mission test must never skip."
+            exit 1
+          fi
+
+      - name: Full suite
+        run: python -m pytest -v

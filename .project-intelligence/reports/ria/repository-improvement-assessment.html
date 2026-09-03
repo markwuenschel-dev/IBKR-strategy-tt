@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en" data-report-responsive="1">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<title>Repository Improvement Assessment — IBKR-strategy-tt</title>
+<style>
+  :root {
+    --page:#08090b; --surface:#0b0c10; --surface2:#101218; --hover:#101218;
+    --ink:#f7f9fc; --ink2:#b6bdc9; --muted:#8f98a6; --faint:#5f6875; --fainter:#4f5866;
+    --line:rgba(255,255,255,.09); --hair:rgba(255,255,255,.055); --gap-line:rgba(255,255,255,.07);
+    --accent:#8b93ff; --accent2:#6b74d8; --link:#9aa2ff;
+    --good:#3ecf8e; --warn:#e5a13d; --bad:#f2606a; --info:#8b93ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --serif:Georgia,'Times New Roman',serif;
+    --sans:ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+    --rail-w:244px;
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body {
+    margin:0; background:var(--page); color:var(--ink2); font-family:var(--sans);
+    background-image:radial-gradient(1100px 620px at 78% -8%,rgba(139,147,255,.13),transparent 62%),
+                     radial-gradient(760px 460px at 4% 4%,rgba(62,207,142,.055),transparent 60%);
+    background-attachment:fixed;
+  }
+  p { margin:0; }
+  code { font-family:var(--mono); }
+  a { color:var(--link); text-decoration:none; }
+  a:hover { color:#c3c8ff; }
+  .eyebrow,.label { font:10px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--faint); }
+  h1 { margin:6px 0 14px; font:400 clamp(38px,7vw,104px)/.92 var(--serif); letter-spacing:-.032em; color:var(--ink); text-wrap:balance; }
+  h2 { margin:0; font:11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.12em; color:var(--muted); }
+  h3 { margin:0 0 7px; font:400 19px/1.2 var(--serif); color:var(--ink); }
+  ul { margin:0; padding-left:18px; }
+  li { margin:6px 0; font:14px/1.62 var(--sans); color:var(--ink2); }
+  pre { margin:0; max-height:420px; overflow:auto; white-space:pre-wrap; font:10.5px/1.6 var(--mono); color:var(--ink2); }
+  .quiet { color:var(--faint); font:14px/1.6 var(--sans); }
+  .meta { font:11px/1.6 var(--mono); color:var(--muted); overflow-wrap:anywhere; }
+  .not-scored { color:var(--fainter); }
+  
+/* shared/report-presentation@1 — responsive, zero-network analytical reports */
+:root {
+  --rp-canvas-max: 3000px;
+  --rp-gutter: clamp(12px, 2.2vw, 48px);
+  --rp-gap: clamp(12px, 1.25vw, 24px);
+  --rp-radius: 16px;
+  --rp-prose: 82ch;
+}
+html { text-size-adjust: 100%; }
+body { overflow-x: hidden; }
+.rp-shell {
+  width: min(var(--rp-canvas-max), calc(100vw - (2 * var(--rp-gutter))));
+  margin-inline: auto;
+  container-type: inline-size;
+  container-name: report;
+}
+.rp-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:var(--rp-gap); align-items:start; }
+.rp-span-12 { grid-column:span 12; }
+.rp-span-8 { grid-column:span 8; }
+.rp-span-6 { grid-column:span 6; }
+.rp-span-4 { grid-column:span 4; }
+.rp-span-3 { grid-column:span 3; }
+.rp-prose { max-width:var(--rp-prose); }
+.rp-card { min-width:0; border-radius:var(--rp-radius); }
+.rp-metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr)); gap:clamp(10px,1vw,18px); }
+.rp-metric { min-width:0; padding:16px; border:1px solid var(--line,rgba(127,127,127,.25)); border-radius:13px; background:color-mix(in srgb,var(--surface,#fff) 94%,transparent); }
+.rp-metric-label { font:600 10px/1.4 var(--mono,ui-monospace,monospace); text-transform:uppercase; letter-spacing:.09em; color:var(--muted,#6b7280); }
+.rp-metric-value { margin-top:7px; font:700 clamp(22px,2.3vw,36px)/1 var(--serif,Georgia,serif); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.rp-metric-note { margin-top:6px; font:12px/1.45 var(--sans,system-ui,sans-serif); color:var(--ink2,#555); }
+.rp-chart-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:var(--rp-gap); }
+.rp-chart-card { grid-column:span 6; min-width:0; overflow:hidden; }
+.rp-chart-card.rp-wide { grid-column:1/-1; }
+.rp-chart-wrap { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-inline:contain; }
+.rp-chart { display:block; width:100%; height:auto; min-width:420px; overflow:visible; }
+.rp-chart text { font-family:var(--sans,system-ui,sans-serif); }
+.rp-chart .rp-label { fill:var(--ink2,#555); font-size:12px; }
+.rp-chart .rp-value { fill:var(--ink,#111); font:600 11px var(--mono,ui-monospace,monospace); }
+.rp-chart .rp-track { fill:color-mix(in srgb,var(--line,#ddd) 52%,transparent); }
+.rp-chart .rp-axis { stroke:var(--line,#ddd); stroke-width:1; }
+.rp-chart-note { margin:7px 0 0; max-width:var(--rp-prose); color:var(--muted,#777); font:12px/1.45 var(--sans,system-ui,sans-serif); }
+.rp-table-wrap { overflow:auto; max-width:100%; border:1px solid var(--line,#ddd); border-radius:12px; }
+.rp-table { width:100%; min-width:780px; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+.rp-table th,.rp-table td { padding:10px 12px; border-top:1px solid var(--line,#ddd); text-align:left; vertical-align:top; }
+.rp-table th { position:sticky; top:0; z-index:1; background:var(--surface,#fff); font:600 10px/1.35 var(--mono,ui-monospace,monospace); text-transform:uppercase; letter-spacing:.08em; color:var(--muted,#777); }
+.rp-table td.rp-number,.rp-table th.rp-number { text-align:right; }
+.rp-pill { display:inline-flex; align-items:center; gap:5px; border:1px solid currentColor; border-radius:999px; padding:3px 8px; font:600 10px/1.35 var(--mono,ui-monospace,monospace); }
+.rp-legend { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:10px; }
+.rp-legend-item { display:inline-flex; align-items:center; gap:6px; color:var(--ink2,#555); font:11px/1.35 var(--sans,system-ui,sans-serif); }
+.rp-swatch { width:10px; height:10px; border-radius:3px; background:var(--swatch); }
+.rp-details { border:1px solid var(--line,#ddd); border-radius:12px; overflow:clip; }
+.rp-details summary { cursor:pointer; padding:12px 14px; font-weight:650; }
+.rp-details[open] summary { border-bottom:1px solid var(--line,#ddd); }
+.rp-details-body { padding:14px; }
+@container report (min-width: 1180px) {
+  .rp-chart-card { grid-column:span 4; }
+  .rp-chart-card.rp-half { grid-column:span 6; }
+  .rp-chart-card.rp-wide { grid-column:1/-1; }
+}
+@container report (min-width: 1540px) {
+  .rp-ultra-3 { grid-column:span 4; }
+  .rp-ultra-4 { grid-column:span 3; }
+  .rp-chart-card.rp-half { grid-column:span 6; }
+}
+@container report (min-width: 2000px) {
+  .rp-chart-card { grid-column:span 3; }
+  .rp-chart-card.rp-half { grid-column:span 6; }
+  .rp-chart-card.rp-wide { grid-column:1/-1; }
+}
+@media (max-width: 980px) {
+  .rp-span-8,.rp-span-6,.rp-span-4,.rp-span-3,.rp-chart-card { grid-column:1/-1; }
+}
+@media (max-width: 620px) {
+  :root { --rp-gutter:10px; --rp-gap:10px; }
+  .rp-chart { min-width:360px; }
+  .rp-metric { padding:13px; }
+}
+@media print {
+  :root { --rp-canvas-max:none; --rp-gutter:0px; }
+  .rp-shell { width:100%; }
+  .rp-card,.rp-chart-card,.rp-metric { break-inside:avoid; box-shadow:none!important; }
+  .rp-chart-wrap,.rp-table-wrap { overflow:visible; }
+}
+
+
+  /* ---- RIA local presentation layer (cascades over the shared family CSS) ---- */
+  main.rp-shell.rp-grid { grid-template-columns:var(--rail-w) minmax(0,1fr); gap:0; align-items:start; padding-bottom:80px; }
+  .rail { position:sticky; top:0; align-self:start; max-height:100vh; overflow-y:auto; padding:34px 26px 26px 0; }
+  .rail-brand { margin:12px 0 14px; font:400 25px/1.12 var(--serif); letter-spacing:-.015em; color:#eef1f5; overflow-wrap:anywhere; }
+  .grade-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 12px 6px 10px; border-radius:999px;
+    border:1px solid rgba(229,161,61,.34); background:rgba(229,161,61,.07); font:11px/1 var(--mono); color:#f0cf9b; }
+  .grade-pill .dot { width:7px; height:7px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 3px rgba(229,161,61,.18); }
+  .nav { display:flex; flex-direction:column; margin:22px 0 20px; }
+  .nav a { display:flex; align-items:baseline; gap:9px; padding:5px 0; font:12px/1.4 var(--sans); color:#7c8593; white-space:nowrap; }
+  .nav a i { font:9px/1 var(--mono); font-style:normal; color:#3f4653; letter-spacing:.06em; }
+  .nav a:hover { color:var(--ink); }
+  .nav a.on { color:var(--ink); } .nav a.on i { color:var(--accent); }
+  .rail-foot { font:10px/1.7 var(--mono); color:var(--faint); border-top:1px solid var(--hair); padding-top:14px; }
+  .col { min-width:0; padding:34px 0 0 clamp(20px,3.4vw,58px); border-left:1px solid var(--gap-line); }
+  .masthead .rule { display:inline-block; width:20px; height:1px; background:var(--accent); vertical-align:middle; margin-right:9px; }
+  .standfirst { max-width:70ch; font:300 21px/1.5 var(--sans); color:var(--ink2); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
+  .chip { font:10.5px/1 var(--mono); padding:7px 10px; border-radius:6px; border:1px solid var(--line);
+    background:rgba(255,255,255,.02); color:var(--muted); overflow-wrap:anywhere; }
+  .status { display:inline-flex; padding:7px 10px; border-radius:6px; font:10.5px/1 var(--mono); border:1px solid currentColor; }
+  .status.complete { color:var(--good); background:rgba(62,207,142,.06); }
+  .status.blocked { color:var(--bad); background:rgba(242,96,106,.07); }
+  section[id] { scroll-margin-top:28px; margin-top:56px; padding-top:40px; border-top:1px solid var(--hair); }
+  .sec-head { display:flex; justify-content:space-between; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:24px; }
+  .sec-head .aside { color:var(--fainter); font:11px/1.4 var(--mono); }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:22px; min-width:0; }
+  .cards { display:grid; gap:15px; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); }
+  .split { display:grid; gap:clamp(20px,2.4vw,40px); grid-template-columns:minmax(0,1.55fr) minmax(0,1fr); align-items:start; }
+  .pull { max-width:30ch; font:400 clamp(28px,3.1vw,46px)/1.12 var(--serif); letter-spacing:-.02em; color:var(--ink); margin-bottom:18px; }
+  .lede { max-width:78ch; font:15.5px/1.68 var(--sans); color:var(--ink2); text-wrap:pretty; }
+  .hairgrid { display:grid; gap:1px; background:var(--gap-line); border:1px solid var(--gap-line); border-radius:14px; overflow:clip; }
+  .lane { display:grid; grid-template-columns:minmax(0,1.5fr) auto minmax(120px,.9fr); gap:14px; align-items:center;
+    background:var(--surface); padding:15px 18px; }
+  .lane:hover { background:var(--hover); }
+  .lane-name { font:13.5px/1.35 var(--sans); color:var(--ink); }
+  .lane-sub { font:10px/1.5 var(--mono); color:var(--faint); text-transform:uppercase; letter-spacing:.1em; }
+  .lane-score { font:400 22px/1 var(--serif); color:var(--ink); font-variant-numeric:tabular-nums; text-align:right; }
+  .bar { display:block; width:100%; height:6px; }
+  .meterlab { display:flex; justify-content:space-between; gap:10px; font:10px/1.5 var(--mono); color:var(--faint); margin-top:7px; }
+  .board { border:1px solid rgba(229,161,61,.22); border-radius:20px; padding:clamp(18px,2vw,26px); margin-top:30px;
+    background:linear-gradient(160deg,rgba(229,161,61,.07),rgba(255,255,255,.012) 58%); }
+  .board-top { display:grid; grid-template-columns:auto minmax(0,1fr); gap:clamp(18px,2.4vw,34px); align-items:center; }
+  .board-cells { display:grid; gap:1px; background:var(--gap-line); border-radius:14px; overflow:clip;
+    grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .cell { background:var(--surface); padding:16px 17px; min-width:0; }
+  .cell:hover { background:rgba(16,18,24,.7); }
+  .cell-top { display:flex; align-items:center; gap:7px; margin-bottom:9px; }
+  .cell-dot { width:7px; height:7px; border-radius:50%; flex:none; }
+  .cell-owner { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
+  .kind { margin-left:auto; font:8.5px/1 var(--mono); text-transform:uppercase; letter-spacing:.09em;
+    padding:4px 6px; border-radius:999px; border:1px solid var(--line); color:var(--faint); }
+  .kind.canonical { color:var(--good); border-color:rgba(62,207,142,.3); }
+  .cell-score { display:flex; align-items:baseline; gap:6px; font:400 clamp(26px,2.4vw,36px)/1 var(--serif);
+    color:var(--ink); font-variant-numeric:tabular-nums; }
+  .cell-score small { font:10px/1 var(--mono); color:var(--faint); }
+  .cell-score .g { margin-left:auto; font:11px/1 var(--mono); color:var(--muted); }
+  .cell-basis { font:10px/1.5 var(--mono); color:var(--faint); margin-top:9px; overflow-wrap:anywhere; }
+  .cell-detail { font:12px/1.5 var(--sans); color:var(--muted); margin-top:5px; }
+  .board-foot { margin-top:16px; padding-top:14px; border-top:1px solid var(--hair);
+    font:12px/1.6 var(--sans); color:var(--muted); max-width:88ch; }
+  .rubric-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:12px; align-items:baseline;
+    padding:9px 0; border-top:1px solid var(--hair); font:12px/1.5 var(--sans); color:var(--muted); }
+  .rubric-row:first-of-type { border-top:0; }
+  .rubric-row b { font:400 17px/1 var(--serif); color:var(--ink2); }
+  .rubric-row.on { color:var(--ink); } .rubric-row.on b { color:var(--warn); }
+  .rubric-row .rng { font:10.5px/1.4 var(--mono); color:var(--faint); }
+  .kv { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 12px; font:11.5px/1.6 var(--mono); }
+  .kv dt { color:var(--muted); overflow-wrap:anywhere; } .kv dd { margin:0; color:var(--ink); font-variant-numeric:tabular-nums; }
+  .owner { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:19px; min-width:0; }
+  .priority { display:grid; grid-template-columns:44px minmax(0,1fr); gap:14px; background:var(--surface);
+    border:1px solid var(--line); border-radius:14px; padding:18px; min-width:0; }
+  .priority:hover { border-color:rgba(139,147,255,.34); }
+  .rank { width:34px; height:34px; border-radius:50%; display:grid; place-items:center;
+    font:11px/1 var(--mono); color:var(--ink); border:1px solid var(--accent); background:rgba(139,147,255,.08); }
+  .priorities,.patterns,.routes,.uncertainties { display:grid; gap:14px; }
+  .patterns,.uncertainties { grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); }
+  .pattern,.route,.uncertainty { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:17px; min-width:0; }
+  .pattern:hover { background:var(--hover); }
+  .pattern p,.priority p { font:14px/1.6 var(--sans); color:var(--ink2); margin-top:2px; }
+  .pill { display:inline-flex; padding:4px 8px; border-radius:999px; border:1px solid currentColor;
+    font:9.5px/1.35 var(--mono); text-transform:uppercase; letter-spacing:.07em; }
+  .pill.good { color:var(--good); } .pill.info { color:var(--accent); }
+  .pill.warn { color:var(--warn); } .pill.bad { color:var(--bad); } .pill.off { color:var(--faint); }
+  .gate-bar,.gate-bar-wrap { display:block; width:100%; margin-top:5px; }
+  .gate-bar-wrap .bar { height:5px; }
+  .next { border-left:3px solid var(--accent); }
+  footer { margin-top:56px; padding-top:20px; border-top:1px solid var(--hair); font:10px/1.8 var(--mono); color:var(--faint); }
+
+  .rp-metric { background:var(--surface); border-color:var(--line); }
+  .rp-metric:hover { background:var(--hover); }
+  .rp-metric-value { font-family:var(--serif); font-weight:400; color:var(--ink); }
+  .rp-chart-card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:20px; }
+  .rp-table-wrap { border-color:var(--line); border-radius:14px; }
+  .rp-table th { background:var(--surface); color:var(--muted); border-color:var(--line); }
+  .rp-table td { border-color:var(--hair); font:13px/1.5 var(--sans); color:var(--ink2); }
+  .rp-table tbody tr:hover { background:rgba(255,255,255,.025); }
+  .rp-table .rp-number { font-variant-numeric:tabular-nums; text-align:right; }
+  .rp-details { border-color:var(--line); border-radius:14px; background:var(--surface); }
+  .rp-details summary { font:11px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--muted); padding:14px 17px; cursor:pointer; }
+  .rp-details summary::-webkit-details-marker { display:none; }
+  .rp-details-body { padding:0 17px 17px; }
+
+  @media (max-width:1499px) { .board-cells { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:900px) { .split { grid-template-columns:1fr; } }
+  @media (max-width:779px) {
+    main.rp-shell.rp-grid { grid-template-columns:1fr; }
+    .rail { position:static; max-height:none; padding:16px 0; border-bottom:1px solid var(--hair); }
+    .rail-brand { margin:8px 0 10px; font-size:21px; }
+    .nav { flex-direction:row; overflow-x:auto; gap:14px; margin:16px 0 0; }
+    .nav a i { display:none; }
+    .rail-foot { display:none; }
+    .col { padding:20px 0 0; border-left:0; }
+    .board-cells { grid-template-columns:1fr; }
+    .board-top { grid-template-columns:1fr; }
+  }
+  @media (min-width:1900px) { :root { --rail-w:292px; } .rail-brand { font-size:30px; } }
+  @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+  @media print {
+    body { background:#fff; color:#111; background-image:none; }
+    .rail,.nav { display:none; }
+    .col { border-left:0; padding-left:0; }
+    .card,.owner,.priority,.pattern,.route,.uncertainty,.cell { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<main class="rp-shell rp-grid">
+  <aside class="rail">
+    <div class="rail-eyebrow eyebrow">RIA · ASSESS</div>
+    <div class="rail-brand">IBKR-strategy-tt</div>
+    <span class="grade-pill"><span class="dot" style="background:#f2606a"></span>Grade D · 48.3</span>
+    <nav class="nav" aria-label="Report sections">
+      <a href="#summary"><i>01</i>Assessment</a>
+      <a href="#signals"><i>02</i>Signals</a>
+      <a href="#quantitative"><i>03</i>Quantitative</a>
+      <a href="#owners"><i>04</i>Owners</a>
+      <a href="#candidates"><i>05</i>Candidates</a>
+      <a href="#priorities"><i>06</i>Priorities</a>
+      <a href="#synthesis"><i>07</i>Synthesis</a>
+      <a href="#routing"><i>08</i>Routing</a>
+      <a href="#evidence"><i>09</i>Evidence</a>
+      <a href="#verification"><i>10</i>Verification</a>
+      <a href="#runtime"><i>11</i>Runtime</a>
+      <a href="#appendix"><i>12</i>Appendix</a>
+    </nav>
+    <div class="rail-foot">revision 4e82893<br />mode read-only<br />0 blockers open</div>
+  </aside>
+
+  <div class="col">
+    <header class="masthead">
+      <div class="eyebrow"><span class="rule"></span>Repository Improvement Assessment · quantitative ASSESS projection</div>
+      <h1>IBKR-strategy-tt</h1>
+      <p class="standfirst">Four owner assessments projected from one immutable revision. Canonical artifacts remain authoritative; this page is a read-only projection and creates no lifecycle state.</p>
+      <div class="chips">
+        <span class="chip">revision 4e82893ff12ebf37e12311e935a6d8e7004ecdab</span>
+        <span class="chip">baseline ria-baseline:4e65331093df7a4ae7996aa145536eae43a4be799a23bd556ba767070910cf8f</span>
+        <span class="chip">mode read-only</span>
+        <span class="status complete">✓ bound analytics ready</span>
+      </div>
+    </header>
+
+    <div class="board"><div class="board-top"><div style="display:flex;gap:16px;align-items:center"><svg viewBox="0 0 120 120" width="104" height="104" role="img" aria-label="Overall grade D, health score 48.3 out of 100"><circle cx="60" cy="60" r="50" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="8"/><circle cx="60" cy="60" r="50" fill="none" stroke="#f2606a" stroke-width="8" stroke-linecap="round" stroke-dasharray="151.9 162.3" transform="rotate(-90 60 60)"/><text x="60" y="74" text-anchor="middle" font-family="Georgia,serif" font-size="38" fill="#f7f9fc">D</text></svg><div><div class="label">Overall grade</div><div style="font:400 26px/1.1 var(--serif);color:var(--ink);margin-top:6px">48.3<span style="font:11px/1 var(--mono);color:var(--faint)">/100</span></div><div class="cell-detail" style="max-width:34ch">Sourced solely from Repository Health Assessment. The three derived ratios beside it are never averaged in.</div></div></div><div class="board-cells"><article class="cell"><div class="cell-top"><span class="cell-dot" style="background:#f2606a"></span><span class="cell-owner">Health</span><span class="kind canonical">canonical</span></div><div class="cell-score">48.3<small>/100</small><span class="g">D</span></div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="Health score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="48.34" height="1" fill="#f2606a"/></svg><div class="cell-basis">canonical health score · raw D</div><div class="cell-detail">11 lanes · 2 caps · confidence 81.7</div></article><article class="cell"><div class="cell-top"><span class="cell-dot" style="background:#3ecf8e"></span><span class="cell-owner">Integrity</span><span class="kind ">derived</span></div><div class="cell-score">95<small>/100</small><span class="g">A</span></div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="Integrity score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="95" height="1" fill="#3ecf8e"/></svg><div class="cell-basis">eligible 38 / 40 candidates</div><div class="cell-detail">Execution-readiness ratio derived by this report, not an Integrity-owned grade.</div></article><article class="cell"><div class="cell-top"><span class="cell-dot" style="background:#e5a13d"></span><span class="cell-owner">Architecture</span><span class="kind ">derived</span></div><div class="cell-score">57.1<small>/100</small><span class="g">C</span></div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="Architecture score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="57.1" height="1" fill="#e5a13d"/></svg><div class="cell-basis">ready 4 / 7 candidates</div><div class="cell-detail">7 scored; unscored remain explicitly unscored.</div></article><article class="cell"><div class="cell-top"><span class="cell-dot" style="background:#3ecf8e"></span><span class="cell-owner">Intelligence</span><span class="kind ">derived</span></div><div class="cell-score">100<small>/100</small><span class="g">A</span></div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="Intelligence score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="100" height="1" fill="#3ecf8e"/></svg><div class="cell-basis">observed 5 / 5 gates</div><div class="cell-detail">Gate-observation ratio. SEI telemetry is not carried by the payload-free intelligence reference.</div></article></div></div><p class="board-foot">Only Health is a canonical owner grade. Integrity, Architecture, and Intelligence are readiness ratios computed by this read-only projection from bound owner counts, marked <code>derived</code>, and excluded from the overall grade. Bands: A ≥ 90, B ≥ 75, C ≥ 50, D ≥ 25, F below — anchored to the 0–4 maturity scale at 25 points per level.</p></div>
+
+    <section id="summary">
+      <div class="sec-head"><h2>01 — Executive assessment</h2><span class="aside">synthesized from bound owner artifacts</span></div>
+      <div class="split">
+        <div>
+          <p class="pull">A well-designed system whose enforcement has not kept pace with its design. The pure core is correct and the seams are well-chosen; almost every finding is about something the architecture asserts but nothing checks.</p>
+          <p class="lede">One immutable baseline, three hash-bound owner artifacts, every grade and score recomputed by the canonical verifiers rather than asserted. The health grade is D with a 92.5% weighted coverage and high confidence, capped by a verification baseline that a clean install cannot reproduce. Forty integrity candidates and seven architecture candidates converge on a single pattern: the four Protocol seams, the paper-trading safety claim, the line budget, the mission-test CI gate, and the working-orders guard are each stated in prose and enforced by nothing.</p>
+        </div>
+        <div class="card"><h3>Repository health grade</h3><div class="rp-chart-wrap" data-rp-chart="repository-health-score"><svg class="rp-chart" viewBox="0 0 760 260" role="img" aria-labelledby="repository-health-score-title repository-health-score-desc"><title id="repository-health-score-title">Repository health score</title><desc id="repository-health-score-desc">Repository Health Assessment final grade D, raw score 48.34 out of 100. This is the canonical Health score, not an invented cross-owner average.</desc><circle cx="190" cy="128" r="82" fill="none" class="rp-track" stroke-width="26"/><circle cx="190" cy="128" r="82" fill="none" stroke="#c93838" stroke-width="26" stroke-linecap="round" stroke-dasharray="249.05792575423015 266.1632694344959" transform="rotate(-90 190 128)"/><text class="rp-value" x="190" y="126" text-anchor="middle" style="font-size:34px">48.3</text><text class="rp-label" x="190" y="149" text-anchor="middle">grade D</text></svg></div><p class="rp-chart-note ">Raw grade D; final grade D after 2 caps.</p></div>
+      </div>
+    </section>
+
+    <section id="signals">
+      <div class="sec-head"><h2>02 — Signals at a glance</h2><span class="aside">canonical values · no cross-owner averaging</span></div>
+      <div class="rp-metric-grid"><article class="rp-metric "><div class="rp-metric-label">Health</div><div class="rp-metric-value">48.3/100</div><div class="rp-metric-note">Grade D · raw D</div></article><article class="rp-metric "><div class="rp-metric-label">Weighted coverage</div><div class="rp-metric-value">92.5%</div><div class="rp-metric-note">Evidence strength 98.4%</div></article><article class="rp-metric "><div class="rp-metric-label">Confidence</div><div class="rp-metric-value">81.7</div><div class="rp-metric-note">high</div></article><article class="rp-metric "><div class="rp-metric-label">Integrity candidates</div><div class="rp-metric-value">40</div><div class="rp-metric-note">38 eligible · 2 judgment-heavy</div></article><article class="rp-metric "><div class="rp-metric-label">Architecture candidates</div><div class="rp-metric-value">7</div><div class="rp-metric-note">7 scored; unscored remain explicitly unscored</div></article><article class="rp-metric "><div class="rp-metric-label">Cross-owner patterns</div><div class="rp-metric-value">5</div><div class="rp-metric-note">Convergent findings, not duplicate ownership</div></article><article class="rp-metric "><div class="rp-metric-label">Verification</div><div class="rp-metric-value">untrustworthy</div><div class="rp-metric-note">3/5 commands passed</div></article><article class="rp-metric "><div class="rp-metric-label">Runtime profile</div><div class="rp-metric-value">FRESH_BASELINE</div><div class="rp-metric-note">MISS: 5</div></article><article class="rp-metric "><div class="rp-metric-label">Wall time</div><div class="rp-metric-value">26m</div><div class="rp-metric-note">Measured end-to-end; concurrent phases are not additive</div></article><article class="rp-metric "><div class="rp-metric-label">Peak concurrency</div><div class="rp-metric-value">5</div><div class="rp-metric-note">Peak READY queue 5</div></article><article class="rp-metric "><div class="rp-metric-label">Scheduler refills</div><div class="rp-metric-value">4</div><div class="rp-metric-note">Immediate READY-queue refill events</div></article><article class="rp-metric "><div class="rp-metric-label">Avoided work</div><div class="rp-metric-value">0</div><div class="rp-metric-note">Cached agents, scans, suites, and report-only rebuilds</div></article></div>
+    </section>
+
+    <section id="quantitative">
+      <div class="sec-head"><h2>03 — Quantitative assessment</h2><span class="aside">canonical child data · zero fabricated scores</span></div>
+      <div class="hairgrid"><div class="lane"><div><div class="lane-name">build-and-delivery</div><div class="lane-sub">weight 3 · level 1.4 of 4</div></div><div class="lane-score">35</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="build-and-delivery lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="35" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">security-and-production-safety</div><div class="lane-sub">weight 5 · critical · level 1.4 of 4</div></div><div class="lane-score">35</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="security-and-production-safety lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="35" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">performance-and-resources</div><div class="lane-sub">weight 3 · level 1.5 of 4</div></div><div class="lane-score">37.5</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="performance-and-resources lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="37.5" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">data-and-migrations</div><div class="lane-sub">weight 4 · critical · level 1.9 of 4</div></div><div class="lane-score">46.3</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="data-and-migrations lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="46.25" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">architecture-fitness</div><div class="lane-sub">weight 4 · critical · level 1.9 of 4</div></div><div class="lane-score">47.5</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="architecture-fitness lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="47.5" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">numerical-correctness</div><div class="lane-sub">weight 4 · critical · level 1.9 of 4</div></div><div class="lane-score">47.5</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="numerical-correctness lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="47.5" height="1" fill="#f2606a"/></svg></div></div><div class="lane"><div><div class="lane-name">platform-compatibility</div><div class="lane-sub">weight 2 · level 2.0 of 4</div></div><div class="lane-score">51.3</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="platform-compatibility lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="51.25" height="1" fill="#e5a13d"/></svg></div></div><div class="lane"><div><div class="lane-name">contracts-and-integration</div><div class="lane-sub">weight 4 · critical · level 2.1 of 4</div></div><div class="lane-score">53.8</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="contracts-and-integration lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="53.75" height="1" fill="#e5a13d"/></svg></div></div><div class="lane"><div><div class="lane-name">verification-readiness</div><div class="lane-sub">weight 4 · critical · level 2.3 of 4</div></div><div class="lane-score">56.3</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="verification-readiness lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="56.25" height="1" fill="#e5a13d"/></svg></div></div><div class="lane"><div><div class="lane-name">correctness-and-integrity</div><div class="lane-sub">weight 5 · critical · level 2.5 of 4</div></div><div class="lane-score">61.3</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="correctness-and-integrity lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="61.25" height="1" fill="#e5a13d"/></svg></div></div><div class="lane"><div><div class="lane-name">maintainability-and-ownership</div><div class="lane-sub">weight 2 · level 2.5 of 4</div></div><div class="lane-score">63.8</div><div><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="maintainability-and-ownership lane score"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="63.75" height="1" fill="#e5a13d"/></svg></div></div></div>
+      <div class="cards" style="margin-top:18px"><article class="card"><h3>Grade rubric</h3><div style="margin-top:12px"><div class="rubric-row "><b>A</b><span>level 3.6 – 4.0 · sustained, enforced maturity</span><span class="rng">90 – 100</span></div><div class="rubric-row "><b>B</b><span>level 3.0 – 3.6 · solid with known gaps</span><span class="rng">75 – 89</span></div><div class="rubric-row "><b>C</b><span>level 2.0 – 3.0 · uneven; material gaps remain</span><span class="rng">50 – 74</span></div><div class="rubric-row on"><b>D</b><span>level 1.0 – 2.0 · thin evidence, weak enforcement</span><span class="rng">25 – 49</span></div><div class="rubric-row "><b>F</b><span>level 0.0 – 1.0 · essentially unestablished</span><span class="rng">0 – 24</span></div></div><p class="cell-detail" style="margin-top:12px">Active band highlighted. Bands are the canonical Health rubric; this report does not re-cut them.</p></article><article class="card"><h3>Grade accounting</h3><dl class="kv" style="margin-top:12px"><dt>raw grade</dt><dd>D</dd><dt>final grade</dt><dd>D</dd><dt>weighted coverage</dt><dd>92.5%</dd><dt>weakest-critical-lane</dt><dd>ceiling C</dd><dt>baseline-test-not-passing</dt><dd>ceiling C</dd></dl></article><article class="card"><h3>Confidence composition</h3><dl class="kv" style="margin-top:12px"><dt>confidence index</dt><dd>81.7</dd><dt>band</dt><dd>high</dd><dt>weighted coverage</dt><dd>92.5%</dd><dt>evidence strength</dt><dd>98.4%</dd><dt>baseline</dt><dd>untrustworthy</dd></dl><p class="cell-detail" style="margin-top:12px">Per-term contributions are not carried in report data v3; the carried inputs and the canonical index are shown instead of a recomputed decomposition.</p></article></div>
+      <div class="rp-chart-grid" style="margin-top:18px"><article class="rp-chart-card rp-card rp-half"><h3>Health lane profile</h3><div class="rp-chart-wrap" data-rp-chart="health-lanes"><svg class="rp-chart" viewBox="0 0 760 394" role="img" aria-labelledby="health-lanes-title health-lanes-desc"><title id="health-lanes-title">Health lane scores</title><desc id="health-lanes-desc">Canonical Repository Health Assessment scores by lane, ordered weakest first.</desc><text class="rp-label" x="8" y="37">build-and-delivery</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="140" height="15" rx="5" fill="#4338ca"><title>build-and-delivery: 35/100</title></rect><text class="rp-value" x="662" y="37">35/100</text><text class="rp-label" x="8" y="69">security-and-production-safety · cri</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="140" height="15" rx="5" fill="#0b8f48"><title>security-and-production-safety · critical: 35/100</title></rect><text class="rp-value" x="662" y="69">35/100</text><text class="rp-label" x="8" y="101">performance-and-resources</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="150" height="15" rx="5" fill="#d97706"><title>performance-and-resources: 37.5/100</title></rect><text class="rp-value" x="662" y="101">37.5/100</text><text class="rp-label" x="8" y="133">data-and-migrations · critical</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="185" height="15" rx="5" fill="#c93838"><title>data-and-migrations · critical: 46.3/100</title></rect><text class="rp-value" x="662" y="133">46.3/100</text><text class="rp-label" x="8" y="165">architecture-fitness · critical</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="190" height="15" rx="5" fill="#2563eb"><title>architecture-fitness · critical: 47.5/100</title></rect><text class="rp-value" x="662" y="165">47.5/100</text><text class="rp-label" x="8" y="197">numerical-correctness · critical</text><rect class="rp-track" x="250" y="185" width="400" height="15" rx="5"/><rect x="250" y="185" width="190" height="15" rx="5" fill="#7c3aed"><title>numerical-correctness · critical: 47.5/100</title></rect><text class="rp-value" x="662" y="197">47.5/100</text><text class="rp-label" x="8" y="229">platform-compatibility</text><rect class="rp-track" x="250" y="217" width="400" height="15" rx="5"/><rect x="250" y="217" width="204.99999999999997" height="15" rx="5" fill="#0891b2"><title>platform-compatibility: 51.3/100</title></rect><text class="rp-value" x="662" y="229">51.3/100</text><text class="rp-label" x="8" y="261">contracts-and-integration · critical</text><rect class="rp-track" x="250" y="249" width="400" height="15" rx="5"/><rect x="250" y="249" width="215" height="15" rx="5" fill="#64748b"><title>contracts-and-integration · critical: 53.8/100</title></rect><text class="rp-value" x="662" y="261">53.8/100</text><text class="rp-label" x="8" y="293">verification-readiness · critical</text><rect class="rp-track" x="250" y="281" width="400" height="15" rx="5"/><rect x="250" y="281" width="225" height="15" rx="5" fill="#4338ca"><title>verification-readiness · critical: 56.3/100</title></rect><text class="rp-value" x="662" y="293">56.3/100</text><text class="rp-label" x="8" y="325">correctness-and-integrity · critical</text><rect class="rp-track" x="250" y="313" width="400" height="15" rx="5"/><rect x="250" y="313" width="245.00000000000003" height="15" rx="5" fill="#0b8f48"><title>correctness-and-integrity · critical: 61.3/100</title></rect><text class="rp-value" x="662" y="325">61.3/100</text><text class="rp-label" x="8" y="357">maintainability-and-ownership</text><rect class="rp-track" x="250" y="345" width="400" height="15" rx="5"/><rect x="250" y="345" width="254.99999999999997" height="15" rx="5" fill="#d97706"><title>maintainability-and-ownership: 63.8/100</title></rect><text class="rp-value" x="662" y="357">63.8/100</text></svg></div><p class="rp-chart-note ">Lane scores are recomputed by the Health verifier from the bound health artifact.</p></article><article class="rp-chart-card rp-card "><h3>Coverage states</h3><div class="rp-chart-wrap" data-rp-chart="coverage-states"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="coverage-states-title coverage-states-desc"><title id="coverage-states-title">Coverage-state distribution</title><desc id="coverage-states-desc">Count of assessed surfaces by coverage state.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="338.1496092591196 126.80610347216981" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>inspected: 8</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#0b8f48" stroke-width="28" stroke-dasharray="84.5374023147799 380.4183104165095" stroke-dashoffset="-338.1496092591196" transform="rotate(-90 145 116)"><title>sampled: 2</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#d97706" stroke-width="28" stroke-dasharray="42.26870115738995 422.68701157389944" stroke-dashoffset="-422.6870115738995" transform="rotate(-90 145 116)"><title>not-applicable: 1</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">11</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">inspected</text><text class="rp-value" x="620" y="58" text-anchor="end">8</text><rect x="285" y="77" width="11" height="11" rx="2" fill="#0b8f48"/><text class="rp-label" x="304" y="87">sampled</text><text class="rp-value" x="620" y="87" text-anchor="end">2</text><rect x="285" y="106" width="11" height="11" rx="2" fill="#d97706"/><text class="rp-label" x="304" y="116">not-applicable</text><text class="rp-value" x="620" y="116" text-anchor="end">1</text></svg></div><p class="rp-chart-note ">Weighted coverage is 92.5%; counts do not replace criticality weighting.</p></article><article class="rp-chart-card rp-card "><h3>Evidence quality</h3><div class="rp-chart-wrap" data-rp-chart="evidence-quality"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="evidence-quality-title evidence-quality-desc"><title id="evidence-quality-title">Evidence-quality distribution</title><desc id="evidence-quality-desc">Count of applicable surfaces by evidence-quality class.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="371.96457018503156 92.99114254625783" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>strong: 8</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#0b8f48" stroke-width="28" stroke-dasharray="92.99114254625789 371.9645701850315" stroke-dashoffset="-371.96457018503156" transform="rotate(-90 145 116)"><title>moderate: 2</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">10</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">strong</text><text class="rp-value" x="620" y="58" text-anchor="end">8</text><rect x="285" y="77" width="11" height="11" rx="2" fill="#0b8f48"/><text class="rp-label" x="304" y="87">moderate</text><text class="rp-value" x="620" y="87" text-anchor="end">2</text></svg></div><p class="rp-chart-note ">Canonical evidence-strength score: 98.4%.</p></article><article class="rp-chart-card rp-card rp-half"><h3>Integrity priority</h3><div class="rp-chart-wrap" data-rp-chart="integrity-priority"><svg class="rp-chart" viewBox="0 0 760 426" role="img" aria-labelledby="integrity-priority-title integrity-priority-desc"><title id="integrity-priority-title">Highest integrity priorities</title><desc id="integrity-priority-desc">Canonical candidate-ledger priority scores for the highest-ranked integrity candidates.</desc><text class="rp-label" x="8" y="37">INT-005 · The CI mission-test gate c</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>INT-005 · The CI mission-test gate cannot fail on a failing mission test: 17</title></rect><text class="rp-value" x="662" y="37">17</text><text class="rp-label" x="8" y="69">INT-025 · The only test asserting th</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="400" height="15" rx="5" fill="#0b8f48"><title>INT-025 · The only test asserting the reviewer&#39;s request bounds asserts the config defaults, so it cannot detect hardcoding: 17</title></rect><text class="rp-value" x="662" y="69">17</text><text class="rp-label" x="8" y="101">INT-040 · The declared ruff format g</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="400" height="15" rx="5" fill="#d97706"><title>INT-040 · The declared ruff format gate is red on the current tree: ruff format --check . wants to reformat README.md: 17</title></rect><text class="rp-value" x="662" y="101">17</text><text class="rp-label" x="8" y="133">INT-037 · CI tests only Python 3.12 </text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="400" height="15" rx="5" fill="#c93838"><title>INT-037 · CI tests only Python 3.12 while requires-python declares &gt;= 3.11: 17</title></rect><text class="rp-value" x="662" y="133">17</text><text class="rp-label" x="8" y="165">INT-008 · disconnect() in a bare fin</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="376.4705882352941" height="15" rx="5" fill="#2563eb"><title>INT-008 · disconnect() in a bare finally raises over the original exception and destroys the documented exit code: 16</title></rect><text class="rp-value" x="662" y="165">16</text><text class="rp-label" x="8" y="197">INT-039 · tzdata is an undeclared ru</text><rect class="rp-track" x="250" y="185" width="400" height="15" rx="5"/><rect x="250" y="185" width="376.4705882352941" height="15" rx="5" fill="#7c3aed"><title>INT-039 · tzdata is an undeclared runtime dependency; a clean install cannot import the CLI on a host without a system tz database: 16</title></rect><text class="rp-value" x="662" y="197">16</text><text class="rp-label" x="8" y="229">INT-017 · _position_size conflates t</text><rect class="rp-track" x="250" y="217" width="400" height="15" rx="5"/><rect x="250" y="217" width="376.4705882352941" height="15" rx="5" fill="#0891b2"><title>INT-017 · _position_size conflates the risk budget and buying power; the resulting NoTrade reason is arithmetically false: 16</title></rect><text class="rp-value" x="662" y="229">16</text><text class="rp-label" x="8" y="261">INT-021 · A missing ANTHROPIC_API_KE</text><rect class="rp-track" x="250" y="249" width="400" height="15" rx="5"/><rect x="250" y="249" width="376.4705882352941" height="15" rx="5" fill="#64748b"><title>INT-021 · A missing ANTHROPIC_API_KEY is not caught at startup and degrades into an all-session silent no-trade: 16</title></rect><text class="rp-value" x="662" y="261">16</text><text class="rp-label" x="8" y="293">INT-032 · int() truncation drops fra</text><rect class="rp-track" x="250" y="281" width="400" height="15" rx="5"/><rect x="250" y="281" width="376.4705882352941" height="15" rx="5" fill="#4338ca"><title>INT-032 · int() truncation drops fractional-share positions from the concentration check: 16</title></rect><text class="rp-value" x="662" y="293">16</text><text class="rp-label" x="8" y="325">INT-004 · Market-data lines leak on </text><rect class="rp-track" x="250" y="313" width="400" height="15" rx="5"/><rect x="250" y="313" width="352.94117647058823" height="15" rx="5" fill="#0b8f48"><title>INT-004 · Market-data lines leak on both the request and the cancellation error paths, contradicting the module&#39;s stated guarantee: 15</title></rect><text class="rp-value" x="662" y="325">15</text><text class="rp-label" x="8" y="357">INT-007 · build_runner leaks a live </text><rect class="rp-track" x="250" y="345" width="400" height="15" rx="5"/><rect x="250" y="345" width="352.94117647058823" height="15" rx="5" fill="#d97706"><title>INT-007 · build_runner leaks a live TWS session on any post-connect construction failure: 15</title></rect><text class="rp-value" x="662" y="357">15</text><text class="rp-label" x="8" y="389">INT-015 · PendingCancel is simultane</text><rect class="rp-track" x="250" y="377" width="400" height="15" rx="5"/><rect x="250" y="377" width="352.94117647058823" height="15" rx="5" fill="#c93838"><title>INT-015 · PendingCancel is simultaneously classified as a terminal venue rejection and as not-yet-settled: 15</title></rect><text class="rp-value" x="662" y="389">15</text></svg></div><p class="rp-chart-note ">Priority arithmetic is recomputed through shared/candidate-ledger-spine.</p></article><article class="rp-chart-card rp-card "><h3>Integrity status</h3><div class="rp-chart-wrap" data-rp-chart="integrity-status"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="integrity-status-title integrity-status-desc"><title id="integrity-status-title">Integrity candidate status</title><desc id="integrity-status-desc">Distribution of integrity candidates by canonical status.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="441.7079270947249 23.247785636564515" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>ready: 38</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#0b8f48" stroke-width="28" stroke-dasharray="23.247785636564473 441.70792709472494" stroke-dashoffset="-441.7079270947249" transform="rotate(-90 145 116)"><title>needs-human-decision: 2</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">40</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">ready</text><text class="rp-value" x="620" y="58" text-anchor="end">38</text><rect x="285" y="77" width="11" height="11" rx="2" fill="#0b8f48"/><text class="rp-label" x="304" y="87">needs-human-decision</text><text class="rp-value" x="620" y="87" text-anchor="end">2</text></svg></div></article><article class="rp-chart-card rp-card "><h3>Architecture disposition</h3><div class="rp-chart-wrap" data-rp-chart="architecture-disposition"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="architecture-disposition-title architecture-disposition-desc"><title id="architecture-disposition-title">Architecture candidate disposition</title><desc id="architecture-disposition-desc">Distribution of architecture candidates by downstream disposition.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="265.68897870359393 199.26673402769546" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>ready_for_integrity_loop: 4</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#0b8f48" stroke-width="28" stroke-dasharray="66.42224467589848 398.5334680553909" stroke-dashoffset="-265.68897870359393" transform="rotate(-90 145 116)"><title>blocked_needs_human_decision: 1</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#d97706" stroke-width="28" stroke-dasharray="66.42224467589848 398.5334680553909" stroke-dashoffset="-332.1112233794924" transform="rotate(-90 145 116)"><title>needs_decision_terrain_mapper: 1</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#c93838" stroke-width="28" stroke-dasharray="66.42224467589848 398.5334680553909" stroke-dashoffset="-398.53346805539087" transform="rotate(-90 145 116)"><title>needs_expanded_grill: 1</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">7</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">ready_for_integrity_loop</text><text class="rp-value" x="620" y="58" text-anchor="end">4</text><rect x="285" y="77" width="11" height="11" rx="2" fill="#0b8f48"/><text class="rp-label" x="304" y="87">blocked_needs_human_decision</text><text class="rp-value" x="620" y="87" text-anchor="end">1</text><rect x="285" y="106" width="11" height="11" rx="2" fill="#d97706"/><text class="rp-label" x="304" y="116">needs_decision_terrain_mappe</text><text class="rp-value" x="620" y="116" text-anchor="end">1</text><rect x="285" y="135" width="11" height="11" rx="2" fill="#c93838"/><text class="rp-label" x="304" y="145">needs_expanded_grill</text><text class="rp-value" x="620" y="145" text-anchor="end">1</text></svg></div><p class="rp-chart-note ">7/7 architecture candidates have canonical ledger scores.</p></article><article class="rp-chart-card rp-card "><h3>Architecture priority</h3><div class="rp-chart-wrap" data-rp-chart="architecture-priority"><svg class="rp-chart" viewBox="0 0 760 266" role="img" aria-labelledby="architecture-priority-title architecture-priority-desc"><title id="architecture-priority-title">Scored architecture priorities</title><desc id="architecture-priority-desc">Canonical ledger priority scores for architecture candidates where a bound score exists.</desc><text class="rp-label" x="8" y="37">ARCH-C3 · Add the api-injection seam</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>ARCH-C3 · Add the api-injection seam scanner.py is missing, unlocking roughly 600 untestable lines: 19</title></rect><text class="rp-value" x="662" y="37">19</text><text class="rp-label" x="8" y="69">ARCH-C4 · Promote the working-orders</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="336.84210526315786" height="15" rx="5" fill="#0b8f48"><title>ARCH-C4 · Promote the working-orders obligation from prose into the MarketData contract: 16</title></rect><text class="rp-value" x="662" y="69">16</text><text class="rp-label" x="8" y="101">ARCH-C1 · Make the ports contract me</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="315.7894736842105" height="15" rx="5" fill="#d97706"><title>ARCH-C1 · Make the ports contract mechanically enforced instead of documentary: 15</title></rect><text class="rp-value" x="662" y="101">15</text><text class="rp-label" x="8" y="133">ARCH-C7 · Give derived quote arithme</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="315.7894736842105" height="15" rx="5" fill="#c93838"><title>ARCH-C7 · Give derived quote arithmetic and model serialization a single owner in models.py: 15</title></rect><text class="rp-value" x="662" y="133">15</text><text class="rp-label" x="8" y="165">ARCH-C5 · Resolve the provenance of </text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="252.6315789473684" height="15" rx="5" fill="#2563eb"><title>ARCH-C5 · Resolve the provenance of docs/ and name the repository&#39;s actual architecture specification: 12</title></rect><text class="rp-value" x="662" y="165">12</text><text class="rp-label" x="8" y="197">ARCH-C2 · Give IBKR translation - se</text><rect class="rp-track" x="250" y="185" width="400" height="15" rx="5"/><rect x="250" y="185" width="189.4736842105263" height="15" rx="5" fill="#7c3aed"><title>ARCH-C2 · Give IBKR translation - session, order status, and contract vocabulary - a single owner: 9</title></rect><text class="rp-value" x="662" y="197">9</text><text class="rp-label" x="8" y="229">ARCH-C6 · Close the gap between the </text><rect class="rp-track" x="250" y="217" width="400" height="15" rx="5"/><rect x="250" y="217" width="189.4736842105263" height="15" rx="5" fill="#0891b2"><title>ARCH-C6 · Close the gap between the production composition root and the tested one: 9</title></rect><text class="rp-value" x="662" y="229">9</text></svg></div><p class="rp-chart-note ">Missing architecture scores are not synthesized.</p></article><article class="rp-chart-card rp-card "><h3>Downstream routing</h3><div class="rp-chart-wrap" data-rp-chart="routing"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="routing-title routing-desc"><title id="routing-title">Downstream disposition</title><desc id="routing-desc">Counts of named candidates or actions routed to each downstream workflow.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="309.9704751541929 154.98523757709648" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>ready: 10</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#0b8f48" stroke-width="28" stroke-dasharray="30.997047515419293 433.9586652158701" stroke-dashoffset="-309.9704751541929" transform="rotate(-90 145 116)"><title>needs expanded grill: 1</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#d97706" stroke-width="28" stroke-dasharray="30.997047515419293 433.9586652158701" stroke-dashoffset="-340.9675226696122" transform="rotate(-90 145 116)"><title>needs decision terrain mapper: 1</title></circle><circle cx="145" cy="116" r="74" fill="none" stroke="#2563eb" stroke-width="28" stroke-dasharray="92.99114254625789 371.9645701850315" stroke-dashoffset="-371.9645701850315" transform="rotate(-90 145 116)"><title>blocked: 3</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">15</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">ready</text><text class="rp-value" x="620" y="58" text-anchor="end">10</text><rect x="285" y="77" width="11" height="11" rx="2" fill="#0b8f48"/><text class="rp-label" x="304" y="87">needs expanded grill</text><text class="rp-value" x="620" y="87" text-anchor="end">1</text><rect x="285" y="106" width="11" height="11" rx="2" fill="#d97706"/><text class="rp-label" x="304" y="116">needs decision terrain mappe</text><text class="rp-value" x="620" y="116" text-anchor="end">1</text><rect x="285" y="135" width="11" height="11" rx="2" fill="#c93838"/><text class="rp-label" x="304" y="145">needs prototype</text><text class="rp-value" x="620" y="145" text-anchor="end">0</text><rect x="285" y="164" width="11" height="11" rx="2" fill="#2563eb"/><text class="rp-label" x="304" y="174">blocked</text><text class="rp-value" x="620" y="174" text-anchor="end">3</text></svg></div></article><article class="rp-chart-card rp-card "><h3>Cross-owner convergence</h3><div class="rp-chart-wrap" data-rp-chart="convergence"><svg class="rp-chart" viewBox="0 0 760 138" role="img" aria-labelledby="convergence-title convergence-desc"><title id="convergence-title">Cross-owner convergence</title><desc id="convergence-desc">Number of cross-cutting patterns established by each owner combination.</desc><text class="rp-label" x="8" y="37">architecture-improvement-intelligenc</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>architecture-improvement-intelligence + integrity: 3</title></rect><text class="rp-value" x="662" y="37">3</text><text class="rp-label" x="8" y="69">architecture-improvement-intelligenc</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="133.33333333333331" height="15" rx="5" fill="#0b8f48"><title>architecture-improvement-intelligence + integrity + health: 1</title></rect><text class="rp-value" x="662" y="69">1</text><text class="rp-label" x="8" y="101">integrity + health</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="133.33333333333331" height="15" rx="5" fill="#d97706"><title>integrity + health: 1</title></rect><text class="rp-value" x="662" y="101">1</text></svg></div><p class="rp-chart-note ">A convergence count reflects separately attributed owners supporting one pattern.</p></article><article class="rp-chart-card rp-card rp-half"><h3>Verification duration</h3><div class="rp-chart-wrap" data-rp-chart="verification-duration"><svg class="rp-chart" viewBox="0 0 760 202" role="img" aria-labelledby="verification-duration-title verification-duration-desc"><title id="verification-duration-title">Verification command duration</title><desc id="verification-duration-desc">Elapsed duration for each recorded verification command.</desc><text class="rp-label" x="8" y="37">lint · ruff check .</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="8.528428093645484" height="15" rx="5" fill="#4338ca"><title>lint · ruff check .: 0.1s</title></rect><text class="rp-value" x="662" y="37">0.1s</text><text class="rp-label" x="8" y="69">lint · ruff format --check .</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="8.862876254180602" height="15" rx="5" fill="#0b8f48"><title>lint · ruff format --check .: 0.1s</title></rect><text class="rp-value" x="662" y="69">0.1s</text><text class="rp-label" x="8" y="101">test · python -m pytest tests/test_m</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="108.19397993311037" height="15" rx="5" fill="#d97706"><title>test · python -m pytest tests/test_mission.py -q: 0.6s</title></rect><text class="rp-value" x="662" y="101">0.6s</text><text class="rp-label" x="8" y="133">test · python -m pytest -q (clean ve</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="309.6989966555184" height="15" rx="5" fill="#c93838"><title>test · python -m pytest -q (clean venv from pip install -e .[dev]): 1.9s</title></rect><text class="rp-value" x="662" y="133">1.9s</text><text class="rp-label" x="8" y="165">test · python -m pytest -q (after pi</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="400" height="15" rx="5" fill="#2563eb"><title>test · python -m pytest -q (after pip install tzdata): 2.4s</title></rect><text class="rp-value" x="662" y="165">2.4s</text></svg></div><p class="rp-chart-note ">Skipped commands show as not scored/unavailable rather than zero work.</p></article></div>
+    </section>
+
+    <section id="owners">
+      <div class="sec-head"><h2>04 — Health, integrity, and architecture</h2><span class="aside">every derived item attributed to its owner</span></div>
+      <div class="cards"><article class="owner"><div class="label">Health</div><h3>Grade D · 48.34/100</h3><ul><li>Weighted coverage 92.5%</li><li>Confidence 81.7 (high)</li><li>0 health candidates</li></ul></article><article class="owner"><div class="label">Integrity</div><h3>40 integrity candidates</h3><ul><li>38 currently eligible</li><li>2 judgment-heavy</li><li>Strong: 32 · Worth exploring: 8</li></ul></article><article class="owner"><div class="label">Architecture</div><h3>7 architecture candidates</h3><ul><li>7 carry canonical ledger scores</li><li>ready_for_integrity_loop: 4 · blocked_needs_human_decision: 1 · needs_decision_terrain_mapper: 1 · needs_expanded_grill: 1</li></ul></article></div>
+    </section>
+
+    <section id="candidates">
+      <div class="sec-head"><h2>05 — Ranked candidate portfolio</h2><span class="aside">Architecture entries show “Not scored” unless a canonical ledger score exists</span></div>
+      <div class="rp-table-wrap"><table class="rp-table"><thead><tr><th>Owner</th><th>ID</th><th>Candidate</th><th class="rp-number">Priority</th><th class="rp-number">Value</th><th class="rp-number">Risk</th><th>Band / score state</th><th>Disposition</th></tr></thead><tbody><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C3</code></td><td>Add the api-injection seam scanner.py is missing, unlocking roughly 600 untestable lines</td><td class="rp-number ">19</td><td class="rp-number ">23</td><td class="rp-number ">4</td><td>Scored</td><td>ready_for_integrity_loop</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-005</code></td><td>The CI mission-test gate cannot fail on a failing mission test</td><td class="rp-number ">17</td><td class="rp-number ">22</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-025</code></td><td>The only test asserting the reviewer&#39;s request bounds asserts the config defaults, so it cannot detect hardcoding</td><td class="rp-number ">17</td><td class="rp-number ">21</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-037</code></td><td>CI tests only Python 3.12 while requires-python declares &gt;= 3.11</td><td class="rp-number ">17</td><td class="rp-number ">20</td><td class="rp-number ">3</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-040</code></td><td>The declared ruff format gate is red on the current tree: ruff format --check . wants to reformat README.md</td><td class="rp-number ">17</td><td class="rp-number ">21</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C4</code></td><td>Promote the working-orders obligation from prose into the MarketData contract</td><td class="rp-number ">16</td><td class="rp-number ">22</td><td class="rp-number ">6</td><td>Scored</td><td>ready_for_integrity_loop</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-008</code></td><td>disconnect() in a bare finally raises over the original exception and destroys the documented exit code</td><td class="rp-number ">16</td><td class="rp-number ">21</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-017</code></td><td>_position_size conflates the risk budget and buying power; the resulting NoTrade reason is arithmetically false</td><td class="rp-number ">16</td><td class="rp-number ">20</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-021</code></td><td>A missing ANTHROPIC_API_KEY is not caught at startup and degrades into an all-session silent no-trade</td><td class="rp-number ">16</td><td class="rp-number ">20</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-032</code></td><td>int() truncation drops fractional-share positions from the concentration check</td><td class="rp-number ">16</td><td class="rp-number ">19</td><td class="rp-number ">3</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-039</code></td><td>tzdata is an undeclared runtime dependency; a clean install cannot import the CLI on a host without a system tz database</td><td class="rp-number ">16</td><td class="rp-number ">21</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C1</code></td><td>Make the ports contract mechanically enforced instead of documentary</td><td class="rp-number ">15</td><td class="rp-number ">22</td><td class="rp-number ">7</td><td>Scored</td><td>ready_for_integrity_loop</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C7</code></td><td>Give derived quote arithmetic and model serialization a single owner in models.py</td><td class="rp-number ">15</td><td class="rp-number ">20</td><td class="rp-number ">5</td><td>Scored</td><td>ready_for_integrity_loop</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-004</code></td><td>Market-data lines leak on both the request and the cancellation error paths, contradicting the module&#39;s stated guarantee</td><td class="rp-number ">15</td><td class="rp-number ">21</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-007</code></td><td>build_runner leaks a live TWS session on any post-connect construction failure</td><td class="rp-number ">15</td><td class="rp-number ">21</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-015</code></td><td>PendingCancel is simultaneously classified as a terminal venue rejection and as not-yet-settled</td><td class="rp-number ">15</td><td class="rp-number ">20</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-016</code></td><td>&#39;Orders submitted&#39; reports 0 for an order that reached the venue and was rejected there</td><td class="rp-number ">15</td><td class="rp-number ">20</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-022</code></td><td>STRIKE_WINDOW_ABOVE quotes ITM puts that can never be selected, defeating the optimization its own comment argues for</td><td class="rp-number ">15</td><td class="rp-number ">20</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-024</code></td><td>SqliteStore.close() has zero callers; the connection is never closed</td><td class="rp-number ">15</td><td class="rp-number ">19</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-027</code></td><td>broker.client hands out a dead session because it guards on `is None` rather than isConnected()</td><td class="rp-number ">15</td><td class="rp-number ">20</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-030</code></td><td>The fills table is the only non-idempotent write, and INSERT OR REPLACE silently reattributes a proposal to a different run</td><td class="rp-number ">15</td><td class="rp-number ">19</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-031</code></td><td>Rounding the credit down before the ratio test makes the screen strictly stricter than configured</td><td class="rp-number ">15</td><td class="rp-number ">19</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-033</code></td><td>ports.Broker.submit&#39;s documented Raises: block omits SubmissionFailed, which the runner actually depends on</td><td class="rp-number ">15</td><td class="rp-number ">19</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-035</code></td><td>Default SQLite journal mode with no single-writer enforcement; a second writer&#39;s outcomes are silently dropped</td><td class="rp-number ">15</td><td class="rp-number ">19</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-036</code></td><td>OptionQuote.spread has no reader outside its own sibling property</td><td class="rp-number ">15</td><td class="rp-number ">18</td><td class="rp-number ">3</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-001</code></td><td>Partial fills are recorded as zero fills; a partially-filled DAY order that then cancels is persisted as BROKER_REJECTED</td><td class="rp-number ">14</td><td class="rp-number ">22</td><td class="rp-number ">8</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-012</code></td><td>The refresh_limit enforcer is entirely untested while its validator has six tests; the whole scanner quoting path is uncovered</td><td class="rp-number ">14</td><td class="rp-number ">20</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-013</code></td><td>_underlying_price prefers a stale prior-session close over the live book, and its docstring contradicts its own code</td><td class="rp-number ">14</td><td class="rp-number ">20</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-014</code></td><td>An unrecognized IBKR order status silently degrades to ACCEPTED, which counts as a live order</td><td class="rp-number ">14</td><td class="rp-number ">20</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-018</code></td><td>Falsy-zero fallbacks fabricate a fill quantity and a fill price, and abs() discards the broker&#39;s reported sign</td><td class="rp-number ">14</td><td class="rp-number ">20</td><td class="rp-number ">6</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-029</code></td><td>MarketSnapshot.implied_volatility has no consumer and carries realized volatility on the fallback path</td><td class="rp-number ">14</td><td class="rp-number ">18</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-034</code></td><td>docs/programming-principles.md cross-references five files that do not exist in this repository</td><td class="rp-number ">14</td><td class="rp-number ">18</td><td class="rp-number ">4</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-006</code></td><td>_describe is unreachable with the real broker, and README documents operator output the system cannot emit</td><td class="rp-number ">13</td><td class="rp-number ">20</td><td class="rp-number ">7</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-011</code></td><td>No type checking exists at all, despite four Protocol seams being the architecture&#39;s central claim</td><td class="rp-number ">13</td><td class="rp-number ">20</td><td class="rp-number ">7</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-020</code></td><td>Reviewer max_tokens default of 1024 against an adaptive-thinking model risks a permanent all-review-fails mode</td><td class="rp-number ">13</td><td class="rp-number ">18</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-038</code></td><td>ib_async is never installed in CI and is pinned only as &gt;=1.0, so the entire broker wire surface is unverified</td><td class="rp-number ">13</td><td class="rp-number ">18</td><td class="rp-number ">5</td><td>Strong</td><td>sequential</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C5</code></td><td>Resolve the provenance of docs/ and name the repository&#39;s actual architecture specification</td><td class="rp-number ">12</td><td class="rp-number ">20</td><td class="rp-number ">8</td><td>Scored</td><td>blocked_needs_human_decision</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-019</code></td><td>Short-strike selection commits to one candidate and never backtracks when liquidity fails</td><td class="rp-number ">12</td><td class="rp-number ">18</td><td class="rp-number ">6</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-023</code></td><td>_preferred_chain can select a tradingClass that invalidates every contract it then builds</td><td class="rp-number ">12</td><td class="rp-number ">18</td><td class="rp-number ">6</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-002</code></td><td>The isolation boundary discards proposal and execution, so a transmitted order leaves no proposal_id anywhere on disk</td><td class="rp-number ">11</td><td class="rp-number ">20</td><td class="rp-number ">9</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-003</code></td><td>An openTrades() failure defeats both the duplicate-symbol guard and max_positions; the docstring&#39;s stated bound does not hold</td><td class="rp-number ">11</td><td class="rp-number ">19</td><td class="rp-number ">8</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-010</code></td><td>KeyboardInterrupt bypasses the isolation boundary and the record write, losing all trace of a possibly-live order</td><td class="rp-number ">11</td><td class="rp-number ">19</td><td class="rp-number ">8</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-026</code></td><td>The paper flag gates nothing at runtime and its port check is an incomplete denylist</td><td class="rp-number ">11</td><td class="rp-number ">19</td><td class="rp-number ">8</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-028</code></td><td>A 300-second time.sleep between passes starves the shared ib_async socket reader</td><td class="rp-number ">11</td><td class="rp-number ">18</td><td class="rp-number ">7</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Integrity</td><td><code>INT-009</code></td><td>account = None sizes trades against an arbitrary account and submits them to a different one</td><td class="rp-number ">10</td><td class="rp-number ">19</td><td class="rp-number ">9</td><td>Worth exploring</td><td>sequential</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C2</code></td><td>Give IBKR translation - session, order status, and contract vocabulary - a single owner</td><td class="rp-number ">9</td><td class="rp-number ">20</td><td class="rp-number ">11</td><td>Scored</td><td>needs_expanded_grill</td></tr><tr><td class="candidate-owner">Architecture</td><td><code>ARCH-C6</code></td><td>Close the gap between the production composition root and the tested one</td><td class="rp-number ">9</td><td class="rp-number ">17</td><td class="rp-number ">8</td><td>Scored</td><td>needs_decision_terrain_mapper</td></tr></tbody></table></div>
+    </section>
+
+    <section id="priorities">
+      <div class="sec-head"><h2>06 — Highest-leverage priorities</h2><span class="aside">canonical IDs preserved</span></div>
+      <div class="priorities"><article class="priority"><div class="rank">1</div><div><h3>The CI mission-test gate cannot fail on a failing mission test</h3><p>Canonical integrity priority 17; Strong.</p><div class="meta">Integrity · INT-005 · sequential</div></div></article><article class="priority"><div class="rank">2</div><div><h3>The only test asserting the reviewer&#39;s request bounds asserts the config defaults, so it cannot detect hardcoding</h3><p>Canonical integrity priority 17; Strong.</p><div class="meta">Integrity · INT-025 · sequential</div></div></article><article class="priority"><div class="rank">3</div><div><h3>The declared ruff format gate is red on the current tree: ruff format --check . wants to reformat README.md</h3><p>Canonical integrity priority 17; Strong.</p><div class="meta">Integrity · INT-040 · sequential</div></div></article><article class="priority"><div class="rank">4</div><div><h3>CI tests only Python 3.12 while requires-python declares &gt;= 3.11</h3><p>Canonical integrity priority 17; Strong.</p><div class="meta">Integrity · INT-037 · sequential</div></div></article><article class="priority"><div class="rank">5</div><div><h3>disconnect() in a bare finally raises over the original exception and destroys the documented exit code</h3><p>Canonical integrity priority 16; Strong.</p><div class="meta">Integrity · INT-008 · sequential</div></div></article><article class="priority"><div class="rank">6</div><div><h3>tzdata is an undeclared runtime dependency; a clean install cannot import the CLI on a host without a system tz database</h3><p>Canonical integrity priority 16; Strong.</p><div class="meta">Integrity · INT-039 · sequential</div></div></article><article class="priority"><div class="rank">7</div><div><h3>_position_size conflates the risk budget and buying power; the resulting NoTrade reason is arithmetically false</h3><p>Canonical integrity priority 16; Strong.</p><div class="meta">Integrity · INT-017 · sequential</div></div></article><article class="priority"><div class="rank">8</div><div><h3>Add the api-injection seam scanner.py is missing, unlocking roughly 600 untestable lines</h3><p>scanner.py calls its vendor loader directly instead of accepting the module as a constructor parameter, which is the exact pattern broker.py uses to make its encoding path testable without the vendor installed.</p><div class="meta">Architecture · ARCH-C3 · ready_for_integrity_loop</div></div></article><article class="priority"><div class="rank">9</div><div><h3>Promote the working-orders obligation from prose into the MarketData contract</h3><p>The duplicate-order guard in the pure core depends on the market-data adapter synthesizing position rows from open orders, an obligation stated in no contract and absent from the default test double.</p><div class="meta">Architecture · ARCH-C4 · ready_for_integrity_loop</div></div></article><article class="priority"><div class="rank">10</div><div><h3>Make the ports contract mechanically enforced instead of documentary</h3><p>ports.py is imported by exactly one module, no Protocol is runtime-checkable, and no type checker exists in the toolchain, so the central architectural claim rests on prose and coincidence.</p><div class="meta">Architecture · ARCH-C1 · ready_for_integrity_loop</div></div></article><article class="priority"><div class="rank">11</div><div><h3>Give derived quote arithmetic and model serialization a single owner in models.py</h3><p>The liquidity figure that selects a contract and the one shown to the reviewer justifying it are computed by different code with different degenerate-case semantics, and a domain type&#39;s wire shape is maintained in three places.</p><div class="meta">Architecture · ARCH-C7 · ready_for_integrity_loop</div></div></article><article class="priority"><div class="rank">12</div><div><h3>Resolve the provenance of docs/ and name the repository&#39;s actual architecture specification</h3><p>Neither document in docs/ describes this repository: one governs a differently-named project, its five referenced siblings are absent, and the machinery both mandate has zero footprint - while several imported principles directly contradict this system&#39;s stated design.</p><div class="meta">Architecture · ARCH-C5 · blocked_needs_human_decision</div></div></article></div>
+    </section>
+
+    <section id="synthesis">
+      <div class="sec-head"><h2>07 — Cross-cutting synthesis</h2><span class="aside">convergent findings, not duplicate ownership</span></div>
+      <div class="patterns"><article class="pattern"><h3>Load-bearing invariants are documented, not enforced</h3><p>The ports contract, the paper-trading guard, the refresh-limit budget, the mission-test gate and the working-orders obligation are each asserted in a docstring or a comment and checked by no test, type, or lint rule. Two docstrings that justify design decisions are provably false: runner.py:209 claims one broad exception handler where there are eighteen, and harness.py:3 claims universal coverage that three test modules bypass.</p><div class="meta">Health · Integrity · Architecture</div></article><article class="pattern"><h3>The environment, not the code, decides whether the suite runs</h3><p>tzdata is undeclared while cli.py:36 evaluates a ZoneInfo lookup at import time, so a clean install of the declared dependencies fails at collection on any host without a system tz database. CI is green only because ubuntu-latest supplies one. Every dependency is an unpinned floor with no lock file, so the verification result is a property of the day it ran.</p><div class="meta">Health · Integrity</div></article><article class="pattern"><h3>The largest adapter is the least verifiable, and that is a structural choice</h3><p>scanner.py is 974 lines behind a correct two-method port, of which roughly 600 cannot be reached by any test because it calls its vendor loader directly instead of accepting it as a parameter, as the sibling broker adapter does. The uncovered region contains the line-budget enforcer, the leak paths, and both pure statistical functions.</p><div class="meta">Integrity · Architecture</div></article><article class="pattern"><h3>Requested intent is substituted for observed fact at the money boundary</h3><p>When the venue reports a fill with no quantity or price, the broker adapter substitutes the proposal&#39;s own quantity and limit price and writes them to the durable record with no marker. Partial fills are separately recorded as zero fills. The reviewer adapter refuses exactly this substitution and says why; the broker adapter does it where the fact is financial.</p><div class="meta">Integrity · Architecture</div></article><article class="pattern"><h3>IBKR translation has no owner</h3><p>The venue-status vocabulary is defined twice and already differs by one member; routing constants and expiry encoding are duplicated across the quote and trade paths, and the two contracts are not field-identical; a live vendor session travels between two adapters as an untyped keyword argument invisible to both their ports.</p><div class="meta">Integrity · Architecture</div></article></div>
+    </section>
+
+    <section id="routing">
+      <div class="sec-head"><h2>08 — Downstream disposition</h2><span class="aside">routing only · no execution authorized</span></div>
+      <div class="routes"><div class="route"><div class="label">blocked</div><ul><li>INT-009</li><li>INT-026</li><li>ARCH-C5</li></ul></div><div class="route"><div class="label">needs decision terrain mapper</div><ul><li>ARCH-C6</li></ul></div><div class="route"><div class="label">needs expanded grill</div><ul><li>ARCH-C2</li></ul></div><div class="route"><div class="label">needs prototype</div><ul><li>none</li></ul></div><div class="route"><div class="label">ready</div><ul><li>INT-005</li><li>INT-025</li><li>INT-040</li><li>INT-037</li><li>INT-008</li><li>INT-039</li><li>ARCH-C3</li><li>ARCH-C4</li><li>ARCH-C1</li><li>ARCH-C7</li></ul></div></div>
+    </section>
+
+    <section id="evidence">
+      <div class="sec-head"><h2>09 — Evidence certainty and gaps</h2><span class="aside">confirmed · inferred · unknown · gaps</span></div>
+      <div class="uncertainties"><div class="uncertainty"><div class="label">confirmed</div><ul><li>All five verification commands were executed in a byte-identical isolated copy; ruff check passed, ruff format --check failed on README.md, the mission test passed, the full suite errored at collection in a clean venv and passed 75/75 once tzdata was installed.</li><li>The SEI snapshot bound 886 measurements at this revision, 745 of them measured.</li><li>The engineering-intelligence artifact, its baseline pin and its index were minted, then re-read and rehashed through the canonical reader with the binding verified.</li></ul></div><div class="uncertainty"><div class="label">inferred</div><ul><li>GitHub Actions&#39; default Linux shell semantics underpin the mission-gate finding; the file content is verified and the piped-exit behaviour was reproduced locally, but not on GitHub&#39;s runners.</li><li>Severity rankings assume this system trades real money, per the live paper-account verification recorded in the README.</li></ul></div><div class="uncertainty"><div class="label">unknown</div><ul><li>No claim about ib_async&#39;s real runtime behaviour could be closed: the library is not installed and CI never installs it, so the entire broker wire surface is asserted only against a hand-written stub.</li><li>Whether the two documents in docs/ are present deliberately as external reference material or by accident cannot be determined from the repository.</li><li>Coverage is a reachability argument from reading test doubles and import graphs, not a measured number; no coverage tooling is configured.</li></ul></div><div class="uncertainty"><div class="label">coverage gaps</div><ul><li>The market-data adapter and the broker wire encoding were assessed statically only; no live TWS session exists.</li><li>Change-coupling, churn and hotspot analysis were unavailable because the working tree is not under version control.</li><li>SEI&#39;s change_discipline dimension scored 0 purely because there is no history to read, not as a judgment about commit practice.</li></ul></div></div>
+    </section>
+
+    <section id="verification">
+      <div class="sec-head"><h2>10 — Verification baseline</h2><span class="aside">skipped commands render as an em dash, never zero work</span></div>
+      <div class="rp-table-wrap"><table class="rp-table" style="min-width:620px"><thead><tr><th>Kind</th><th>Result</th><th>Command</th><th class="rp-number">Seconds</th></tr></thead><tbody><tr><td>lint</td><td><span class="pill good">pass</span></td><td><code>ruff check .</code><span class="gate-bar-wrap"><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="ruff check . duration"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="2.132107023411371" height="1" fill="#3ecf8e"/></svg></span></td><td class="rp-number">0.1</td></tr><tr><td>lint</td><td><span class="pill bad">fail</span></td><td><code>ruff format --check .</code><span class="gate-bar-wrap"><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="ruff format --check . duration"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="2.2157190635451505" height="1" fill="#3ecf8e"/></svg></span></td><td class="rp-number">0.1</td></tr><tr><td>test</td><td><span class="pill good">pass</span></td><td><code>python -m pytest tests/test_mission.py -q</code><span class="gate-bar-wrap"><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="python -m pytest tests/test_mission.py -q duration"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="27.048494983277592" height="1" fill="#3ecf8e"/></svg></span></td><td class="rp-number">0.6</td></tr><tr><td>test</td><td><span class="pill bad">error</span></td><td><code>python -m pytest -q (clean venv from pip install -e .[dev])</code><span class="gate-bar-wrap"><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="python -m pytest -q (clean venv from pip install -e .[dev]) duration"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="77.4247491638796" height="1" fill="#3ecf8e"/></svg></span></td><td class="rp-number">1.9</td></tr><tr><td>test</td><td><span class="pill good">pass</span></td><td><code>python -m pytest -q (after pip install tzdata)</code><span class="gate-bar-wrap"><svg class="bar" viewBox="0 0 100 1" preserveAspectRatio="none" role="img" aria-label="python -m pytest -q (after pip install tzdata) duration"><rect x="0" y="0" width="100" height="1" fill="rgba(255,255,255,.08)"/><rect x="0" y="0" width="100" height="1" fill="#3ecf8e"/></svg></span></td><td class="rp-number">2.4</td></tr></tbody></table></div>
+    </section>
+
+    <section id="runtime">
+      <div class="sec-head"><h2>11 — Runtime and performance</h2><span class="aside">executor telemetry · recorded, not estimated</span></div>
+      <div class="rp-chart-grid"><article class="rp-chart-card rp-half"><h3>Wall-clock tasks</h3><div class="rp-chart-wrap" data-rp-chart="runtime-phases"><svg class="rp-chart" viewBox="0 0 760 394" role="img" aria-labelledby="runtime-phases-title runtime-phases-desc"><title id="runtime-phases-title">RIA task durations</title><desc id="runtime-phases-desc">Longest recorded RIA task durations, with critical-path work ordered first.</desc><text class="rp-label" x="8" y="37">Architecture Improvement Intelligenc</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>Architecture Improvement Intelligence: 23.2m</title></rect><text class="rp-value" x="662" y="37">23.2m</text><text class="rp-label" x="8" y="69">Software Engineering Intelligence</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="17.22900215362527" height="15" rx="5" fill="#0b8f48"><title>Software Engineering Intelligence: 1m</title></rect><text class="rp-value" x="662" y="69">1m</text><text class="rp-label" x="8" y="101">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="2" height="15" rx="5" fill="#d97706"><title>Repository Improvement Assessment: 6s</title></rect><text class="rp-value" x="662" y="101">6s</text><text class="rp-label" x="8" y="133">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="2" height="15" rx="5" fill="#c93838"><title>Repository Improvement Assessment: 5s</title></rect><text class="rp-value" x="662" y="133">5s</text><text class="rp-label" x="8" y="165">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="2" height="15" rx="5" fill="#2563eb"><title>Repository Improvement Assessment: 3s</title></rect><text class="rp-value" x="662" y="165">3s</text><text class="rp-label" x="8" y="197">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="185" width="400" height="15" rx="5"/><rect x="250" y="185" width="2" height="15" rx="5" fill="#7c3aed"><title>Repository Improvement Assessment: 2s</title></rect><text class="rp-value" x="662" y="197">2s</text><text class="rp-label" x="8" y="229">Repository Health Assessment</text><rect class="rp-track" x="250" y="217" width="400" height="15" rx="5"/><rect x="250" y="217" width="315.00358937544866" height="15" rx="5" fill="#0891b2"><title>Repository Health Assessment: 18.3m</title></rect><text class="rp-value" x="662" y="229">18.3m</text><text class="rp-label" x="8" y="261">Codebase Integrity Audit Loop</text><rect class="rp-track" x="250" y="249" width="400" height="15" rx="5"/><rect x="250" y="249" width="272.505384063173" height="15" rx="5" fill="#64748b"><title>Codebase Integrity Audit Loop: 15.8m</title></rect><text class="rp-value" x="662" y="261">15.8m</text><text class="rp-label" x="8" y="293">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="281" width="400" height="15" rx="5"/><rect x="250" y="281" width="133.2376166547021" height="15" rx="5" fill="#4338ca"><title>Repository Improvement Assessment: 7.7m</title></rect><text class="rp-value" x="662" y="293">7.7m</text><text class="rp-label" x="8" y="325">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="313" width="400" height="15" rx="5"/><rect x="250" y="313" width="101.65111270638909" height="15" rx="5" fill="#0b8f48"><title>Repository Improvement Assessment: 5.9m</title></rect><text class="rp-value" x="662" y="325">5.9m</text><text class="rp-label" x="8" y="357">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="345" width="400" height="15" rx="5"/><rect x="250" y="345" width="34.45800430725054" height="15" rx="5" fill="#d97706"><title>Repository Improvement Assessment: 2m</title></rect><text class="rp-value" x="662" y="357">2m</text></svg></div><p class="rp-chart-note ">Concurrent bars are not additive wall time; use the wall-time metric for elapsed duration.</p></article><article class="rp-chart-card"><h3>Tool calls</h3><div class="rp-chart-wrap" data-rp-chart="tool-calls"><svg class="rp-chart" viewBox="0 0 760 394" role="img" aria-labelledby="tool-calls-title tool-calls-desc"><title id="tool-calls-title">Task tool-call count</title><desc id="tool-calls-desc">Tool-call totals recorded for the most tool-intensive RIA tasks and owners.</desc><text class="rp-label" x="8" y="37">Codebase Integrity Audit Loop</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>Codebase Integrity Audit Loop: 50</title></rect><text class="rp-value" x="662" y="37">50</text><text class="rp-label" x="8" y="69">Architecture Improvement Intelligenc</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="392" height="15" rx="5" fill="#0b8f48"><title>Architecture Improvement Intelligence: 49</title></rect><text class="rp-value" x="662" y="69">49</text><text class="rp-label" x="8" y="101">Repository Health Assessment</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="344" height="15" rx="5" fill="#d97706"><title>Repository Health Assessment: 43</title></rect><text class="rp-value" x="662" y="101">43</text><text class="rp-label" x="8" y="133">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="200" height="15" rx="5" fill="#c93838"><title>Repository Improvement Assessment: 25</title></rect><text class="rp-value" x="662" y="133">25</text><text class="rp-label" x="8" y="165">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="72" height="15" rx="5" fill="#2563eb"><title>Repository Improvement Assessment: 9</title></rect><text class="rp-value" x="662" y="165">9</text><text class="rp-label" x="8" y="197">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="185" width="400" height="15" rx="5"/><rect x="250" y="185" width="72" height="15" rx="5" fill="#7c3aed"><title>Repository Improvement Assessment: 9</title></rect><text class="rp-value" x="662" y="197">9</text><text class="rp-label" x="8" y="229">Software Engineering Intelligence</text><rect class="rp-track" x="250" y="217" width="400" height="15" rx="5"/><rect x="250" y="217" width="32" height="15" rx="5" fill="#0891b2"><title>Software Engineering Intelligence: 4</title></rect><text class="rp-value" x="662" y="229">4</text><text class="rp-label" x="8" y="261">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="249" width="400" height="15" rx="5"/><rect x="250" y="249" width="24" height="15" rx="5" fill="#64748b"><title>Repository Improvement Assessment: 3</title></rect><text class="rp-value" x="662" y="261">3</text><text class="rp-label" x="8" y="293">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="281" width="400" height="15" rx="5"/><rect x="250" y="281" width="16" height="15" rx="5" fill="#4338ca"><title>Repository Improvement Assessment: 2</title></rect><text class="rp-value" x="662" y="293">2</text><text class="rp-label" x="8" y="325">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="313" width="400" height="15" rx="5"/><rect x="250" y="313" width="8" height="15" rx="5" fill="#0b8f48"><title>Repository Improvement Assessment: 1</title></rect><text class="rp-value" x="662" y="325">1</text><text class="rp-label" x="8" y="357">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="345" width="400" height="15" rx="5"/><rect x="250" y="345" width="8" height="15" rx="5" fill="#d97706"><title>Repository Improvement Assessment: 1</title></rect><text class="rp-value" x="662" y="357">1</text></svg></div><p class="rp-chart-note ">Tool-call count is workload telemetry, not a quality score.</p></article><article class="rp-chart-card"><h3>Token usage</h3><div class="rp-chart-wrap" data-rp-chart="token-usage"><svg class="rp-chart" viewBox="0 0 760 202" role="img" aria-labelledby="token-usage-title token-usage-desc"><title id="token-usage-title">Task token usage</title><desc id="token-usage-desc">Recorded token consumption by semantic task or assessment owner.</desc><text class="rp-label" x="8" y="37">Codebase Integrity Audit Loop</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>Codebase Integrity Audit Loop: 220784</title></rect><text class="rp-value" x="662" y="37">220784</text><text class="rp-label" x="8" y="69">Repository Health Assessment</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="380.4659757953475" height="15" rx="5" fill="#0b8f48"><title>Repository Health Assessment: 210002</title></rect><text class="rp-value" x="662" y="69">210002</text><text class="rp-label" x="8" y="101">Architecture Improvement Intelligenc</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="276.8389013696645" height="15" rx="5" fill="#d97706"><title>Architecture Improvement Intelligence: 152804</title></rect><text class="rp-value" x="662" y="101">152804</text><text class="rp-label" x="8" y="133">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="235.2942242191463" height="15" rx="5" fill="#c93838"><title>Repository Improvement Assessment: 129873</title></rect><text class="rp-value" x="662" y="133">129873</text><text class="rp-label" x="8" y="165">Repository Improvement Assessment</text><rect class="rp-track" x="250" y="153" width="400" height="15" rx="5"/><rect x="250" y="153" width="202.23929270236974" height="15" rx="5" fill="#2563eb"><title>Repository Improvement Assessment: 111628</title></rect><text class="rp-value" x="662" y="165">111628</text></svg></div><p class="rp-chart-note ">Token count is cost telemetry and should be interpreted with artifact reuse and task scope.</p></article><article class="rp-chart-card"><h3>Cache outcomes</h3><div class="rp-chart-wrap" data-rp-chart="cache-outcomes"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="cache-outcomes-title cache-outcomes-desc"><title id="cache-outcomes-title">Artifact reuse outcomes</title><desc id="cache-outcomes-desc">Cache state across SEI, verification, Health, Integrity, and Architecture artifacts.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="464.9557127312894 0" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>MISS: 5</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">5</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">MISS</text><text class="rp-value" x="620" y="58" text-anchor="end">5</text></svg></div><p class="rp-chart-note ">Exact and incremental reuse avoid recomputation only when revision, engine, configuration, and contract bindings remain valid.</p></article><article class="rp-chart-card"><h3>Avoided work</h3><div class="rp-chart-wrap" data-rp-chart="avoided-work"><svg class="rp-chart" viewBox="0 0 760 170" role="img" aria-labelledby="avoided-work-title avoided-work-desc"><title id="avoided-work-title">Work avoided through reuse</title><desc id="avoided-work-desc">Counts of duplicate suites, owner agents, full scans, and report-only rebuilds avoided by this run.</desc><text class="rp-label" x="8" y="37">Duplicate Verification Suites</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="2" height="15" rx="5" fill="#4338ca"><title>Duplicate Verification Suites: 0</title></rect><text class="rp-value" x="662" y="37">0</text><text class="rp-label" x="8" y="69">Owner Agents</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="2" height="15" rx="5" fill="#0b8f48"><title>Owner Agents: 0</title></rect><text class="rp-value" x="662" y="69">0</text><text class="rp-label" x="8" y="101">Full Sei Scans</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="2" height="15" rx="5" fill="#d97706"><title>Full Sei Scans: 0</title></rect><text class="rp-value" x="662" y="101">0</text><text class="rp-label" x="8" y="133">Report Only Rebuilds</text><rect class="rp-track" x="250" y="121" width="400" height="15" rx="5"/><rect x="250" y="121" width="2" height="15" rx="5" fill="#c93838"><title>Report Only Rebuilds: 0</title></rect><text class="rp-value" x="662" y="133">0</text></svg></div><p class="rp-chart-note ">These counts are recorded by the executor; they are not estimated after the run.</p></article><article class="rp-chart-card"><h3>Peak class concurrency</h3><div class="rp-chart-wrap" data-rp-chart="class-concurrency"><svg class="rp-chart" viewBox="0 0 760 138" role="img" aria-labelledby="class-concurrency-title class-concurrency-desc"><title id="class-concurrency-title">Peak executor concurrency by class</title><desc id="class-concurrency-desc">Maximum observed simultaneous work by executor resource class.</desc><text class="rp-label" x="8" y="37">Agent</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="400" height="15" rx="5" fill="#4338ca"><title>Agent: 5</title></rect><text class="rp-value" x="662" y="37">5</text><text class="rp-label" x="8" y="69">Deterministic</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="160" height="15" rx="5" fill="#0b8f48"><title>Deterministic: 2</title></rect><text class="rp-value" x="662" y="69">2</text><text class="rp-label" x="8" y="101">Report</text><rect class="rp-track" x="250" y="89" width="400" height="15" rx="5"/><rect x="250" y="89" width="80" height="15" rx="5" fill="#d97706"><title>Report: 1</title></rect><text class="rp-value" x="662" y="101">1</text></svg></div><p class="rp-chart-note ">Overall peak concurrency: 5; READY-queue peak: 5.</p></article><article class="rp-chart-card"><h3>Useful overlap</h3><div class="rp-chart-wrap" data-rp-chart="runtime-overlap"><svg class="rp-chart" viewBox="0 0 760 106" role="img" aria-labelledby="runtime-overlap-title runtime-overlap-desc"><title id="runtime-overlap-title">Pipeline overlap</title><desc id="runtime-overlap-desc">Measured overlap between SEI and shared verification plus the common owner-parallel window.</desc><text class="rp-label" x="8" y="37">SEI + verification overlap</text><rect class="rp-track" x="250" y="25" width="400" height="15" rx="5"/><rect x="250" y="25" width="2" height="15" rx="5" fill="#4338ca"><title>SEI + verification overlap: 0ms</title></rect><text class="rp-value" x="662" y="37">0ms</text><text class="rp-label" x="8" y="69">Owner parallel window</text><rect class="rp-track" x="250" y="57" width="400" height="15" rx="5"/><rect x="250" y="57" width="400" height="15" rx="5" fill="#0b8f48"><title>Owner parallel window: 15.8m</title></rect><text class="rp-value" x="662" y="69">15.8m</text></svg></div><p class="rp-chart-note ">Overlap is elapsed time removed from the serialized critical path.</p></article><article class="rp-chart-card"><h3>Task outcomes</h3><div class="rp-chart-wrap" data-rp-chart="task-states"><svg class="rp-chart" viewBox="0 0 760 240" role="img" aria-labelledby="task-states-title task-states-desc"><title id="task-states-title">Execution task states</title><desc id="task-states-desc">Final state of every recorded task in the RIA execution graph.</desc><circle cx="145" cy="116" r="74" fill="none" class="rp-track" stroke-width="28"/><circle cx="145" cy="116" r="74" fill="none" stroke="#4338ca" stroke-width="28" stroke-dasharray="464.9557127312894 0" stroke-dashoffset="0" transform="rotate(-90 145 116)"><title>completed: 11</title></circle><text class="rp-value" x="145" y="112" text-anchor="middle" style="font-size:28px">11</text><text class="rp-label" x="145" y="133" text-anchor="middle">total</text><rect x="285" y="48" width="11" height="11" rx="2" fill="#4338ca"/><text class="rp-label" x="304" y="58">completed</text><text class="rp-value" x="620" y="58" text-anchor="end">11</text></svg></div><p class="rp-chart-note ">Retries: 0; cancellations: 0.</p></article></div>
+    </section>
+
+    <section id="appendix">
+      <div class="sec-head"><h2>12 — Appendix and assessment status</h2><span class="aside">hash-verified bindings</span></div>
+      <div class="cards"><article class="owner-ref"><div class="label">Health</div><h3>repository-health-assessment</h3><dl><div><dt>artifact</dt><dd>health-assessment:3ad6547573f8a2878d128b317f99baaaca8daa0bec764d9a4c61185c48a00ad7</dd></div><div><dt>sha256</dt><dd>3ad6547573f8a2878d128b317f99baaaca8daa0bec764d9a4c61185c48a00ad7</dd></div><div><dt>revision</dt><dd>4e82893ff12ebf37e12311e935a6d8e7004ecdab</dd></div></dl></article><article class="owner-ref"><div class="label">Integrity</div><h3>codebase-integrity-audit-loop</h3><dl><div><dt>artifact</dt><dd>integrity-candidate-ledger:39e7d5bc4487c9b6068eecbe70225785e21153bf4acee32e11113e292628a473</dd></div><div><dt>sha256</dt><dd>39e7d5bc4487c9b6068eecbe70225785e21153bf4acee32e11113e292628a473</dd></div><div><dt>revision</dt><dd>4e82893ff12ebf37e12311e935a6d8e7004ecdab</dd></div></dl></article><article class="owner-ref"><div class="label">Architecture</div><h3>architecture-improvement-intelligence</h3><dl><div><dt>artifact</dt><dd>architecture-candidate-set:157771505f6e0e804e68982299b7374886e496eec3e029bdd691fd5a14c51e88</dd></div><div><dt>sha256</dt><dd>157771505f6e0e804e68982299b7374886e496eec3e029bdd691fd5a14c51e88</dd></div><div><dt>revision</dt><dd>4e82893ff12ebf37e12311e935a6d8e7004ecdab</dd></div></dl></article></div>
+      <div class="cards" style="margin-top:15px">
+        <div class="card"><h3>Assessment status</h3><ul><li>All three canonical owner artifacts were byte-hash verified, revision-compatible, and normalized through their authoritative scoring/verification logic.</li></ul></div>
+        <div class="card next"><h3>Next lifecycle</h3><ul>
+          <li>Return the immutable ASSESS projection to the invoking caller.</li>
+          <li>Only the router may reserve RECONCILE.</li>
+          <li>No graph, action, execution, verification, integration, publication, or merge state is created by this report.</li>
+        </ul></div>
+      </div>
+      <div style="display:grid;gap:12px;margin-top:15px">
+        <details class="rp-details"><summary>Coverage, provenance, and report model <span style="float:right">JSON</span></summary><div class="rp-details-body"><pre>{
+  &quot;baseline_ref&quot;: {
+    &quot;artifact_id&quot;: &quot;ria-baseline:4e65331093df7a4ae7996aa145536eae43a4be799a23bd556ba767070910cf8f&quot;,
+    &quot;repository_revision&quot;: &quot;4e82893ff12ebf37e12311e935a6d8e7004ecdab&quot;,
+    &quot;sha256&quot;: &quot;4e65331093df7a4ae7996aa145536eae43a4be799a23bd556ba767070910cf8f&quot;
+  },
+  &quot;engineering_intelligence_ref&quot;: {
+    &quot;artifact_id&quot;: &quot;engineering-intelligence:8f14c7971078e7fd8a59db3db1f863cad83164d13e4268997ddbd5e3df86e140&quot;,
+    &quot;baseline_binding&quot;: {
+      &quot;artifact_id&quot;: &quot;ria-baseline:4e65331093df7a4ae7996aa145536eae43a4be799a23bd556ba767070910cf8f&quot;,
+      &quot;repository_revision&quot;: &quot;4e82893ff12ebf37e12311e935a6d8e7004ecdab&quot;,
+      &quot;sha256&quot;: &quot;4e65331093df7a4ae7996aa145536eae43a4be799a23bd556ba767070910cf8f&quot;
+    },
+    &quot;kind&quot;: &quot;engineering-intelligence&quot;,
+    &quot;mission_id&quot;: &quot;RIA-IBKR-strategy-tt-2026-08-30&quot;,
+    &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+    &quot;repository_revision&quot;: &quot;4e82893ff12ebf37e12311e935a6d8e7004ecdab&quot;,
+    &quot;schema_version&quot;: &quot;1.0.0&quot;,
+    &quot;scope_hash&quot;: &quot;1dc7f97ad719245f2d74af70e98c0ff0a21cfdcb3dab0ec26eee8eb7754b0a3c&quot;,
+    &quot;sha256&quot;: &quot;8f14c7971078e7fd8a59db3db1f863cad83164d13e4268997ddbd5e3df86e140&quot;
+  },
+  &quot;artifact_bindings&quot;: [
+    {
+      &quot;owner&quot;: &quot;repository-health-assessment&quot;,
+      &quot;path&quot;: &quot;C:\\Users\\Nalakram\\AppData\\Local\\Temp\\claude\\C--Users-Nalakram-Documents-GitHub-IBKR-strategy-tt\\d7235fea-57f8-4969-afd6-b8bc9bd1dfdc\\scratchpad\\ria\\health.json&quot;,
+      &quot;sha256&quot;: &quot;3ad6547573f8a2878d128b317f99baaaca8daa0bec764d9a4c61185c48a00ad7&quot;
+    },
+    {
+      &quot;owner&quot;: &quot;codebase-integrity-audit-loop&quot;,
+      &quot;path&quot;: &quot;C:\\Users\\Nalakram\\AppData\\Local\\Temp\\claude\\C--Users-Nalakram-Documents-GitHub-IBKR-strategy-tt\\d7235fea-57f8-4969-afd6-b8bc9bd1dfdc\\scratchpad\\ria\\integrity.json&quot;,
+      &quot;sha256&quot;: &quot;39e7d5bc4487c9b6068eecbe70225785e21153bf4acee32e11113e292628a473&quot;
+    },
+    {
+      &quot;owner&quot;: &quot;architecture-improvement-intelligence&quot;,
+      &quot;path&quot;: &quot;C:\\Users\\Nalakram\\AppData\\Local\\Temp\\claude\\C--Users-Nalakram-Documents-GitHub-IBKR-strategy-tt\\d7235fea-57f8-4969-afd6-b8bc9bd1dfdc\\scratchpad\\ria\\architecture.json&quot;,
+      &quot;sha256&quot;: &quot;157771505f6e0e804e68982299b7374886e496eec3e029bdd691fd5a14c51e88&quot;
+    }
+  ],
+  &quot;provenance&quot;: {
+    &quot;architecture_scores_fabricated&quot;: false,
+    &quot;child_artifacts_hash_verified&quot;: true,
+    &quot;child_artifacts_revision_verified&quot;: true,
+    &quot;health_grading_recomputed&quot;: true,
+    &quot;integrity_scoring_recomputed&quot;: true,
+    &quot;production_binding_enforced&quot;: true,
+    &quot;report_model&quot;: &quot;repository-improvement-assessment-report-data@3&quot;
+  }
+}</pre></div></details>
+        <details class="rp-details"><summary>Report election <span style="float:right">JSON</span></summary><div class="rp-details-body"><pre>{
+  &quot;lean&quot;: &quot;generate&quot;,
+  &quot;policy&quot;: &quot;generate&quot;,
+  &quot;reason&quot;: &quot;The user explicitly elected the report when invoking the assessment.&quot;,
+  &quot;state&quot;: &quot;elected-generate&quot;
+}</pre></div></details>
+        <details class="rp-details"><summary>Raw performance receipt <span style="float:right">JSON</span></summary><div class="rp-details-body"><pre>{
+  &quot;avoided_work&quot;: {
+    &quot;duplicate_verification_suites&quot;: 0,
+    &quot;full_sei_scans&quot;: 0,
+    &quot;owner_agents&quot;: 0,
+    &quot;report_only_rebuilds&quot;: 0
+  },
+  &quot;cache&quot;: {
+    &quot;architecture-improvement-intelligence&quot;: &quot;MISS&quot;,
+    &quot;codebase-integrity-audit-loop&quot;: &quot;MISS&quot;,
+    &quot;repository-health-assessment&quot;: &quot;MISS&quot;,
+    &quot;sei&quot;: &quot;MISS&quot;,
+    &quot;verification&quot;: &quot;MISS&quot;
+  },
+  &quot;generated_at&quot;: &quot;2026-08-30T07:42:00.000Z&quot;,
+  &quot;overlap&quot;: {
+    &quot;owner_parallel_window_ms&quot;: 949000,
+    &quot;sei_verification_ms&quot;: 0
+  },
+  &quot;peaks&quot;: {
+    &quot;class_concurrency&quot;: {
+      &quot;agent&quot;: 5,
+      &quot;deterministic&quot;: 2,
+      &quot;report&quot;: 1
+    },
+    &quot;ready_queue&quot;: 5,
+    &quot;refill_events&quot;: 4,
+    &quot;total_concurrency&quot;: 5
+  },
+  &quot;repository_revision&quot;: &quot;4e82893ff12ebf37e12311e935a6d8e7004ecdab&quot;,
+  &quot;run_id&quot;: &quot;ria-ibkr-strategy-tt-20260830-01&quot;,
+  &quot;schema_version&quot;: &quot;ria.performance-receipt@1&quot;,
+  &quot;startup&quot;: {
+    &quot;mode&quot;: &quot;FRESH_BASELINE&quot;,
+    &quot;reason_codes&quot;: [
+      &quot;NO_EXACT_ARTIFACT&quot;,
+      &quot;NO_COMPATIBLE_REACHABLE_ANCESTOR&quot;
+    ],
+    &quot;startup_time_ms&quot;: 4200
+  },
+  &quot;tasks&quot;: [
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 5000,
+      &quot;executor_class&quot;: &quot;deterministic&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:17:05.000Z&quot;,
+      &quot;id&quot;: &quot;baseline&quot;,
+      &quot;kind&quot;: &quot;baseline&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:17:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 3
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 60000,
+      &quot;executor_class&quot;: &quot;deterministic&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:22:00.000Z&quot;,
+      &quot;id&quot;: &quot;sei&quot;,
+      &quot;kind&quot;: &quot;analysis&quot;,
+      &quot;owner&quot;: &quot;software-engineering-intelligence&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:21:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 4
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 6000,
+      &quot;executor_class&quot;: &quot;deterministic&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:22:11.000Z&quot;,
+      &quot;id&quot;: &quot;engineering-intelligence&quot;,
+      &quot;kind&quot;: &quot;evidence&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:22:05.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 2
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: false,
+      &quot;duration_ms&quot;: 120000,
+      &quot;executor_class&quot;: &quot;deterministic&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:28:00.000Z&quot;,
+      &quot;id&quot;: &quot;verification&quot;,
+      &quot;kind&quot;: &quot;verification&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:26:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 9
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: false,
+      &quot;duration_ms&quot;: 1097000,
+      &quot;executor_class&quot;: &quot;agent&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:35:47.000Z&quot;,
+      &quot;id&quot;: &quot;owner-health&quot;,
+      &quot;kind&quot;: &quot;assessment&quot;,
+      &quot;owner&quot;: &quot;repository-health-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:17:30.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 210002,
+      &quot;tool_calls&quot;: 43
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: false,
+      &quot;duration_ms&quot;: 949000,
+      &quot;executor_class&quot;: &quot;agent&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:33:19.000Z&quot;,
+      &quot;id&quot;: &quot;owner-integrity&quot;,
+      &quot;kind&quot;: &quot;assessment&quot;,
+      &quot;owner&quot;: &quot;codebase-integrity-audit-loop&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:17:30.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 220784,
+      &quot;tool_calls&quot;: 50
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 1393000,
+      &quot;executor_class&quot;: &quot;agent&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:40:43.000Z&quot;,
+      &quot;id&quot;: &quot;owner-architecture&quot;,
+      &quot;kind&quot;: &quot;assessment&quot;,
+      &quot;owner&quot;: &quot;architecture-improvement-intelligence&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:17:30.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 152804,
+      &quot;tool_calls&quot;: 49
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: false,
+      &quot;duration_ms&quot;: 354000,
+      &quot;executor_class&quot;: &quot;agent&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:23:54.000Z&quot;,
+      &quot;id&quot;: &quot;schema-health-contract&quot;,
+      &quot;kind&quot;: &quot;contract-extraction&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:18:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 111628,
+      &quot;tool_calls&quot;: 9
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: false,
+      &quot;duration_ms&quot;: 464000,
+      &quot;executor_class&quot;: &quot;agent&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:25:44.000Z&quot;,
+      &quot;id&quot;: &quot;schema-report-contract&quot;,
+      &quot;kind&quot;: &quot;contract-extraction&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:18:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 129873,
+      &quot;tool_calls&quot;: 25
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 2000,
+      &quot;executor_class&quot;: &quot;report&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:41:02.000Z&quot;,
+      &quot;id&quot;: &quot;report-data&quot;,
+      &quot;kind&quot;: &quot;normalization&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:41:00.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 1
+    },
+    {
+      &quot;cache_state&quot;: &quot;MISS&quot;,
+      &quot;cancellation_count&quot;: 0,
+      &quot;critical_path&quot;: true,
+      &quot;duration_ms&quot;: 3000,
+      &quot;executor_class&quot;: &quot;report&quot;,
+      &quot;failure_code&quot;: null,
+      &quot;finished_at&quot;: &quot;2026-08-30T07:41:05.000Z&quot;,
+      &quot;id&quot;: &quot;report-render&quot;,
+      &quot;kind&quot;: &quot;render&quot;,
+      &quot;owner&quot;: &quot;repository-improvement-assessment&quot;,
+      &quot;retry_count&quot;: 0,
+      &quot;started_at&quot;: &quot;2026-08-30T07:41:02.000Z&quot;,
+      &quot;state&quot;: &quot;completed&quot;,
+      &quot;tokens&quot;: 0,
+      &quot;tool_calls&quot;: 1
+    }
+  ],
+  &quot;wall_time_ms&quot;: 1560000,
+  &quot;worker_budgets&quot;: {
+    &quot;class_budgets&quot;: {
+      &quot;agent&quot;: 5,
+      &quot;deterministic&quot;: 3,
+      &quot;report&quot;: 1
+    },
+    &quot;max_parallel&quot;: 8
+  }
+}</pre></div></details>
+      </div>
+    </section>
+
+    <footer>RIA ASSESS analytics report · responsive zero-network HTML · canonical owner artifacts remain authoritative</footer>
+  </div>
+</main>
+<script>
+(() => {
+  document.documentElement.dataset.reportResponsive = "1";
+  const wide = window.matchMedia("(min-width: 1500px)");
+  const apply = () => document.documentElement.dataset.reportDensity = wide.matches ? "wide" : "standard";
+  apply();
+  if (typeof wide.addEventListener === "function") wide.addEventListener("change", apply);
+})();
+</script>
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll(".nav a"));
+  var sections = Array.prototype.slice.call(document.querySelectorAll("section[id]"));
+  if (!links.length || !sections.length || typeof IntersectionObserver !== "function") return;
+  var visible = Object.create(null);
+  function paint() {
+    var top = null;
+    for (var i = 0; i < sections.length; i += 1) {
+      if (visible[sections[i].id]) { top = sections[i].id; break; }
+    }
+    if (!top) return;
+    for (var j = 0; j < links.length; j += 1) {
+      var href = links[j].getAttribute("href");
+      if (href === "#" + top) links[j].classList.add("on");
+      else links[j].classList.remove("on");
+    }
+  }
+  var observer = new IntersectionObserver(function (entries) {
+    for (var k = 0; k < entries.length; k += 1) visible[entries[k].target.id] = entries[k].isIntersecting;
+    paint();
+  }, { rootMargin: "-12% 0px -70% 0px" });
+  for (var s = 0; s < sections.length; s += 1) observer.observe(sections[s]);
+})();
+</script>
+</body>
+</html>

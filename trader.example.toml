@@ -1,0 +1,90 @@
+# IBKR Tastytrade engine (V4) - example configuration.
+#
+# Every value below is validated at startup, before anything connects. An
+# invalid or contradictory setting prints the field, the value you supplied and
+# the constraint it violated, then exits non-zero without placing an order.
+#
+# Copy to trader.toml and edit.
+
+# Symbols to scan, in order. Upper case, no duplicates.
+universe = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+
+# Where the durable record of proposals, reviews, orders and fills is written.
+database_path = "ibkr_trader.sqlite3"
+
+# Seconds between passes when running `loop`. Ignored by `run`.
+scan_interval_seconds = 300.0
+
+
+[ibkr]
+host = "127.0.0.1"
+# 7497 = TWS paper, 4002 = Gateway paper. 7496/4001 are LIVE and are rejected
+# while paper = true.
+port = 7497
+client_id = 1
+paper = true
+# account = "DU1234567"   # optional; required if the login has several accounts
+connect_timeout_seconds = 10.0
+
+# Concurrent market-data lines. Hard ceiling is 200 - a larger value is
+# rejected at startup, not mid-scan.
+refresh_limit = 100
+
+# 1 = live, 2 = frozen, 3 = delayed, 4 = delayed-frozen.
+# Options stop quoting outside regular hours, so a live (1) scan before the
+# open finds no bid/ask and records data errors rather than trading. That is
+# deliberate. Use 2 for an off-hours dry run against the previous session's
+# last quotes - and only ever deliberately, since those prices are stale.
+market_data_type = 1
+
+
+[strategy]
+# Sell premium only when volatility is historically rich.
+min_iv_rank = 30.0
+
+# Days to expiration: aim for target, accept anything inside the band.
+target_dte = 45
+min_dte = 30
+max_dte = 60
+
+# Short strike selection, by absolute delta.
+short_delta_target = 0.30
+min_short_delta = 0.20
+max_short_delta = 0.40
+
+# Width of the vertical, in strike points.
+spread_width = 5
+
+# Minimum credit as a fraction of width. 1/3 is the classic Tastytrade bar.
+min_credit_ratio = 0.3333333333333333
+
+# How far below spot to look for strikes, as a fraction of spot. Must cover
+# the short strike (0.20-0.40 delta, usually 3-10% OTM) plus the long strike a
+# further spread_width below. Widen for high-volatility underlyings; every
+# extra percent costs contract-qualification round trips on every scan.
+strike_window_pct = 0.15
+
+# Liquidity screens, applied to every leg.
+#
+# NOTE: IBKR does not deliver open interest under frozen/delayed market data.
+# If you run with market_data_type = 2/3/4, min_open_interest = 100 will screen
+# out every contract and you will see NO_TRADE on liquidity for every symbol.
+max_spread_pct = 0.10
+min_open_interest = 100
+min_volume = 0
+
+
+[risk]
+# Maximum defined risk of one trade, as a fraction of net liquidation value.
+max_risk_per_trade = 0.02
+max_contracts = 10
+max_positions = 10
+allow_duplicate_symbol = false
+
+
+[reviewer]
+# The independent reviewer. Note what is absent: no heartbeat interval, no
+# liveness deadline, no session lease. It is called once per proposed trade.
+model = "claude-sonnet-5"
+timeout_seconds = 90.0
+max_tokens = 1024

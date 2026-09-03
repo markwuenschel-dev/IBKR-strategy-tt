@@ -1,0 +1,51 @@
+[project]
+name = "ibkr-trader"
+version = "4.0.0"
+description = "Paper-first Tastytrade options engine: scan, evaluate, review, trade, record."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+# Only needed to talk to a real TWS / IB Gateway. The whole test suite,
+# including the mission test, runs without it.
+broker = ["ib_async>=1.0"]
+dev = ["pytest>=8", "pytest-timeout>=2", "ruff>=0.5"]
+
+[project.scripts]
+ibkr-trader = "ibkr_trader.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ibkr_trader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+# No test may hang the suite. The mission test uses an injected clock and
+# should complete in milliseconds.
+timeout = 60
+
+[tool.ruff]
+line-length = 95
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "UP", "B", "SIM", "RET", "ARG", "BLE"]
+# `class X(str, Enum)` is deliberate: every use site reads `.value` explicitly,
+# and the mixin form keeps the enums usable on interpreters without StrEnum.
+ignore = ["UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+# Protocol implementations must accept the full interface signature even when a
+# particular implementation ignores an argument.
+"ibkr_trader/broker.py" = ["ARG002"]
+"ibkr_trader/runner.py" = ["ARG001"]
+"tests/fakes.py" = ["ARG002"]
+"tests/test_broker_encoding.py" = ["ARG002"]
+"tests/test_pending_orders.py" = ["ARG002"]
