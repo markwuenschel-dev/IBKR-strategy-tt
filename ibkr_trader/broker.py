@@ -67,20 +67,28 @@ _DONE_STATUSES = frozenset({"Filled", "Cancelled", "ApiCancelled", "Inactive"})
 #:
 #: ``Inactive`` is IBKR's answer for "I looked at this and will not work it",
 #: which is a rejection *by the venue* and therefore ``BROKER_REJECTED`` -- not
-#: ``SubmissionFailed``, which means the order never got there at all. An
-#: unmapped or empty status is an acknowledgement we cannot classify as live, so
-#: it degrades to ``ACCEPTED``.
+#: ``SubmissionFailed``, which means the order never got there at all.
+#:
+#: ``PendingCancel`` is a cancel *request* IBKR has not confirmed: the order can
+#: still fill, and the venue can still refuse the cancel. It is therefore
+#: ``WORKING`` and is deliberately absent from :data:`_DONE_STATUSES`, so the two
+#: tables agree that this status is not settled.
+#:
+#: An unmapped or empty status is one nothing here can classify. It degrades to
+#: ``EXECUTION_AMBIGUOUS`` rather than ``ACCEPTED``, because "I do not recognise
+#: this" and "the venue acknowledged it" are different claims, and only the
+#: former belongs in the reconciliation bucket.
 _STATUS_OUTCOMES: Mapping[str, Outcome] = {
     "Filled": Outcome.FILLED,
     "Submitted": Outcome.WORKING,
     "PreSubmitted": Outcome.WORKING,
     "PendingSubmit": Outcome.WORKING,
+    "PendingCancel": Outcome.WORKING,
     "ApiPending": Outcome.ACCEPTED,
     "ApiUpdate": Outcome.ACCEPTED,
     "Inactive": Outcome.BROKER_REJECTED,
     "Cancelled": Outcome.BROKER_REJECTED,
     "ApiCancelled": Outcome.BROKER_REJECTED,
-    "PendingCancel": Outcome.BROKER_REJECTED,
 }
 
 
@@ -246,11 +254,18 @@ class IBKRBroker:
         session; opening a second one would burn another client id and another
         set of market-data lines for nothing.
 
+        Liveness is checked, not just presence: a session that has dropped
+        since :meth:`connect` returned leaves ``self._ib`` set but unusable, and
+        handing that out lets a caller work against a dead socket.
+
         Raises:
-            BrokerNotConnected: :meth:`connect` has not been called.
+            BrokerNotConnected: :meth:`connect` has not been called, or the
+                session it opened is no longer live.
         """
         if self._ib is None:
             raise BrokerNotConnected("connect() must be called before use")
+        if not self._ib.isConnected():
+            raise BrokerNotConnected("the IBKR session is no longer connected")
         return self._ib
 
     def connect(self) -> None:
@@ -349,8 +364,26 @@ class IBKRBroker:
                 f"IBKR refused order {proposal.proposal_id} before transmission: {exc}"
             ) from exc
 
-        self._settle(trade, proposal)
-        return self._interpret(trade, proposal)
+        # Past this point the order is live at IBKR. Anything that fails while
+        # reading its result is an ambiguity about a transmitted order, not a
+        # generic error: it must carry the order_ref so the runner's isolation
+        # boundary can persist the proposal instead of losing every trace of it.
+        try:
+            self._settle(trade, proposal)
+            return self._interpret(trade, proposal)
+        except (ExecutionAmbiguous, BrokerNotConnected, SubmissionFailed):
+            raise
+        except Exception as exc:
+            logger.error(
+                "could not read the result of transmitted order %s: %s",
+                proposal.proposal_id,
+                exc,
+            )
+            raise ExecutionAmbiguous(
+                f"order {proposal.proposal_id} was transmitted but its result could "
+                f"not be read: {exc}",
+                order_ref=proposal.proposal_id,
+            ) from exc
 
     # -- contract and order construction -----------------------------------
 
@@ -503,7 +536,7 @@ class IBKRBroker:
                 order_ref=proposal.proposal_id,
             )
 
-        outcome = _STATUS_OUTCOMES.get(status, Outcome.ACCEPTED)
+        outcome = _STATUS_OUTCOMES.get(status, Outcome.EXECUTION_AMBIGUOUS)
 
         if outcome is Outcome.BROKER_REJECTED:
             message = _rejection_text(trade)
@@ -513,7 +546,7 @@ class IBKRBroker:
         elif status in _STATUS_OUTCOMES:
             message = f"IBKR status {status}"
         else:
-            message = f"IBKR acknowledged order with unrecognized status {status!r}"
+            message = f"IBKR reported unrecognized status {status!r}; state unresolved"
             logger.warning("unmapped IBKR status %r for %s", status, proposal.proposal_id)
 
         return ExecutionResult(
@@ -521,7 +554,11 @@ class IBKRBroker:
             order_ref=proposal.proposal_id,
             broker_order_id=self._broker_order_id(trade),
             message=message,
-            fills=self._build_fills(trade, proposal) if outcome is Outcome.FILLED else (),
+            # Fills are read from whatever the venue reported, not gated on the
+            # outcome: a DAY order that partially filled and then cancelled is
+            # BROKER_REJECTED and still owns contracts. _build_fills returns ()
+            # when nothing actually traded.
+            fills=self._build_fills(trade, proposal),
         )
 
     def _broker_order_id(self, trade: Any) -> str | None:
@@ -546,13 +583,29 @@ class IBKRBroker:
         The returned price carries the proposal's sign convention: positive for
         a credit received, negative for a debit paid, matching
         ``TradeProposal.limit_price``.
+
+        Nothing is fabricated. A quantity or price the venue did not report is
+        unknown, not zero, and an unknown fill is no fill: substituting the
+        proposal's own quantity and limit price would write a *request* into the
+        durable record as though it were an observed *fact*, with no marker
+        saying so. Returns ``()`` whenever the venue has not reported a real
+        execution, which is also how a genuinely unfilled order reports.
         """
         status = trade.orderStatus
-        quantity = int(getattr(status, "filled", 0) or proposal.quantity)
 
-        magnitude = Decimal(str(abs(getattr(status, "avgFillPrice", 0.0) or 0.0)))
+        reported_quantity = getattr(status, "filled", None)
+        if reported_quantity is None:
+            return ()
+        quantity = int(reported_quantity)
+        if quantity <= 0:
+            return ()
+
+        reported_price = getattr(status, "avgFillPrice", None)
+        if reported_price is None:
+            return ()
+        magnitude = Decimal(str(abs(reported_price)))
         if magnitude == 0:
-            magnitude = abs(proposal.limit_price)
+            return ()
         price = magnitude if proposal.is_credit else -magnitude
 
         filled_at = self._clock.now()
