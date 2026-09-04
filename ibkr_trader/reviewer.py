@@ -322,9 +322,23 @@ def _response_text(message: Any, proposal_id: str) -> str:
     so blocks are filtered by type rather than indexed positionally. A response
     with no text at all is a failed review, not an empty one.
 
+    A response cut off by the token budget is reported as exactly that. Without
+    the check the truncated JSON surfaces as "not a valid verdict", which sends
+    the operator looking at the prompt instead of at ``reviewer.max_tokens``.
+
     Raises:
-        ReviewError: the response shape was unusable or carried no text.
+        ReviewError: the response shape was unusable, carried no text, or was
+            truncated before the model finished.
     """
+    if getattr(message, "stop_reason", None) == "max_tokens":
+        logger.warning(
+            "review response truncated: proposal=%s stop_reason=max_tokens", proposal_id
+        )
+        raise ReviewError(
+            f"reviewer response for proposal {proposal_id} was cut off by the token "
+            f"budget (stop_reason=max_tokens); raise reviewer.max_tokens"
+        )
+
     try:
         blocks = list(message.content)
     except (AttributeError, TypeError) as exc:
