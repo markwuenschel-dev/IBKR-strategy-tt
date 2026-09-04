@@ -105,7 +105,18 @@ class PassSummary:
 
     @property
     def broker_rejected(self) -> int:
-        return self._count(Outcome.BROKER_REJECTED, Outcome.SUBMISSION_FAILED)
+        """Refused *by the venue*. The order arrived and was turned down."""
+        return self._count(Outcome.BROKER_REJECTED)
+
+    @property
+    def never_sent(self) -> int:
+        """Refused before transmission. Nothing reached the venue.
+
+        Split from ``broker_rejected`` because the two need different responses:
+        a venue rejection is a question about the order, and a failure to send
+        is a question about this process.
+        """
+        return self._count(Outcome.SUBMISSION_FAILED)
 
     @property
     def ambiguous(self) -> int:
@@ -131,7 +142,8 @@ class PassSummary:
             f"Orders submitted: {self.orders_submitted}",
             f"Filled: {self.filled}",
             f"Working: {self.working}",
-            f"Broker rejected: {self.broker_rejected}",
+            f"Rejected by venue: {self.broker_rejected}",
+            f"Never sent: {self.never_sent}",
         ]
         if self.ambiguous:
             lines.append(f"Ambiguous (needs reconciliation): {self.ambiguous}")

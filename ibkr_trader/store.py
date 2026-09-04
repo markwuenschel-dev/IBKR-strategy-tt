@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .clock import Clock, SystemClock
-from .models import SymbolResult
+from .models import SymbolResult, leg_payload
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbol_attempts (
@@ -253,19 +253,10 @@ class SqliteStore:
 
 
 def _legs_as_json(proposal) -> list[dict[str, Any]]:
-    """Serialize proposal legs, preserving exact decimal prices as strings."""
-    return [
-        {
-            "action": leg.action.value,
-            "right": leg.right.value,
-            "strike": str(leg.strike),
-            "expiry": leg.expiry.isoformat(),
-            "ratio": leg.ratio,
-            "bid": str(leg.bid),
-            "ask": str(leg.ask),
-            "delta": leg.delta,
-            "open_interest": leg.open_interest,
-            "volume": leg.volume,
-        }
-        for leg in proposal.legs
-    ]
+    """Serialize proposal legs, preserving exact decimal prices as strings.
+
+    The audit row carries the raw market only. The derived liquidity figures are
+    reproducible from bid and ask at any time, and storing a second copy of a
+    computed number is how the stored one drifts from the computation.
+    """
+    return [leg_payload(leg) for leg in proposal.legs]

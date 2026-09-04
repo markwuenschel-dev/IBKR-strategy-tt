@@ -27,7 +27,6 @@ import json
 import logging
 import re
 from collections.abc import Mapping
-from decimal import Decimal
 from typing import Any, Protocol
 
 import anthropic
@@ -41,6 +40,7 @@ from .models import (
     ProposalLeg,
     ReviewDecision,
     TradeProposal,
+    leg_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,28 +95,12 @@ _FENCE_RE = re.compile(r"\A```(?:json)?\s*(?P<body>.*?)\s*```\Z", re.DOTALL)
 def _leg_payload(leg: ProposalLeg) -> dict[str, Any]:
     """Render one leg with the liquidity the reviewer needs to judge the fill.
 
-    ``spread_pct`` is the only derived number here: it is unambiguous arithmetic
-    on the leg's own quote, and it is what a human would compute first. It is
-    ``None`` — not infinity — when the mid is non-positive, so the payload stays
-    valid JSON while still showing the market is unusable.
+    The derived figures are the leg's own, not a re-derivation of them: the
+    reviewer is shown the same arithmetic the liquidity screen applied when it
+    selected the contract. This used to recompute mid and spread here, and the
+    two implementations disagreed on a dead book.
     """
-    mid = (leg.bid + leg.ask) / Decimal(2)
-    spread = leg.ask - leg.bid
-    return {
-        "action": leg.action.value,
-        "right": leg.right.value,
-        "strike": str(leg.strike),
-        "expiry": leg.expiry.isoformat(),
-        "ratio": leg.ratio,
-        "bid": str(leg.bid),
-        "ask": str(leg.ask),
-        "mid": str(mid),
-        "spread": str(spread),
-        "spread_pct": float(spread / mid) if mid > 0 else None,
-        "delta": leg.delta,
-        "open_interest": leg.open_interest,
-        "volume": leg.volume,
-    }
+    return leg_payload(leg, derived=True)
 
 
 def build_review_payload(proposal: TradeProposal, portfolio: Portfolio) -> dict[str, Any]:
