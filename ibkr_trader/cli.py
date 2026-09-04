@@ -13,6 +13,7 @@ exit, never a half-started process holding a broker connection.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 from datetime import time
@@ -21,7 +22,7 @@ from zoneinfo import ZoneInfo
 from .broker import IBKRBroker
 from .clock import Clock, SystemClock
 from .config import RunConfig, load_config
-from .errors import BrokerNotConnected, ConfigError
+from .errors import BrokerError, BrokerNotConnected, ConfigError
 from .reviewer import ClaudeReviewer
 from .runner import Runner
 from .scanner import IBKRMarketData
@@ -70,31 +71,46 @@ def configure_logging(verbose: bool) -> None:
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
-def build_runner(config: RunConfig, clock: Clock) -> tuple[Runner, IBKRBroker]:
+def build_runner(config: RunConfig, clock: Clock) -> tuple[Runner, IBKRBroker, SqliteStore]:
     """Wire the production runner.
 
     One ``IB`` client is shared by the scanner and the broker: they are two
     views of the same session, and opening a second connection would consume a
     second client id for no reason.
+
+    The store is returned alongside the runner so the caller can close it in the
+    same teardown that closes the session. Everything constructed after
+    ``connect()`` is guarded: from that point a live TWS session exists, and a
+    failure while wiring the rest must not strand it with no reference to close.
     """
     broker = IBKRBroker(config.ibkr, clock)
     broker.connect()
 
-    market_data = IBKRMarketData(
-        ibkr_config=config.ibkr,
-        strategy_config=config.strategy,
-        clock=clock,
-        ib=broker.client,
-    )
-    runner = Runner(
-        config=config,
-        market_data=market_data,
-        reviewer=ClaudeReviewer(config.reviewer, clock),
-        broker=broker,
-        store=SqliteStore(config.database_path, clock=clock),
-        clock=clock,
-    )
-    return runner, broker
+    try:
+        market_data = IBKRMarketData(
+            ibkr_config=config.ibkr,
+            strategy_config=config.strategy,
+            clock=clock,
+            ib=broker.client,
+        )
+        store = SqliteStore(config.database_path, clock=clock)
+        runner = Runner(
+            config=config,
+            market_data=market_data,
+            reviewer=ClaudeReviewer(config.reviewer, clock),
+            broker=broker,
+            store=store,
+            clock=clock,
+        )
+    except BaseException:
+        # Includes KeyboardInterrupt: an interrupt during wiring leaks the
+        # session just as surely as an exception does. A disconnect that itself
+        # fails must not replace the failure being reported.
+        with contextlib.suppress(Exception):
+            broker.disconnect()
+        raise
+
+    return runner, broker, store
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,20 +140,34 @@ def main(argv: list[str] | None = None) -> int:
 
     clock = SystemClock()
     try:
-        runner, broker = build_runner(config, clock)
+        runner, broker, store = build_runner(config, clock)
     except BrokerNotConnected as exc:
         print(f"Cannot connect to IBKR: {exc}", file=sys.stderr)
         return EXIT_BROKER_ERROR
 
+    exit_code = EXIT_OK
     try:
         if args.command == "run":
             runner.run_once()
         else:
             runner.run_while(lambda: is_market_open(clock))
     finally:
-        broker.disconnect()
+        # Teardown reports its own failures; it never raises over the outcome of
+        # the run. An exception escaping here would replace the documented exit
+        # code with an unhandled traceback -- `raise SystemExit(main())` never
+        # runs -- and, when the run itself failed, would hide the real cause
+        # behind "could not close the session".
+        try:
+            broker.disconnect()
+        except BrokerError as exc:
+            print(f"Failed to close the IBKR session: {exc}", file=sys.stderr)
+            exit_code = EXIT_BROKER_ERROR
+        try:
+            store.close()
+        except Exception as exc:  # noqa: BLE001 - teardown must not mask the run
+            print(f"Failed to close the database: {exc}", file=sys.stderr)
 
-    return EXIT_OK
+    return exit_code
 
 
 if __name__ == "__main__":
