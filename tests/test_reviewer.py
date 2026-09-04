@@ -180,10 +180,17 @@ def test_reviewer_sends_exactly_one_request_even_when_it_fails():
 
 
 def test_request_is_bounded_by_configured_timeout_and_tokens():
-    """The single request carries the configured bounds."""
+    """The single request carries the configured bounds.
+
+    Asserted against the configuration, not against literals. Literals equal to
+    today's defaults would pass just as happily if the implementation hardcoded
+    them; `test_reviewer_bounds` drives the same request from a *non-default*
+    config, which is what actually distinguishes the two.
+    """
+    config, _ = canonical_proposal()
     reviewer, proposal, client = review_with('{"approved": true, "reason": "ok"}')
     reviewer.review(proposal, PORTFOLIO)
 
     call = client.calls[0]
-    assert call["timeout"] == 90.0
-    assert call["max_tokens"] == 1024
+    assert call["timeout"] == config.reviewer.timeout_seconds
+    assert call["max_tokens"] == config.reviewer.max_tokens

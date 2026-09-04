@@ -169,7 +169,10 @@ class ReviewerConfig(_Base):
 
     model: str = "claude-sonnet-5"
     timeout_seconds: float = Field(default=90.0, gt=0, le=600)
-    max_tokens: int = Field(default=1024, ge=64, le=8192)
+    # Thinking tokens are output tokens on an adaptive-thinking model, and the
+    # JSON verdict has to fit in the same budget. 1024 risked truncating every
+    # review -- a permanent all-reviews-fail mode, not an occasional one.
+    max_tokens: int = Field(default=8192, ge=64, le=32768)
 
 
 class RunConfig(_Base):

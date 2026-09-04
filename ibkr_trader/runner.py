@@ -168,7 +168,28 @@ class Runner:
 
         results: list[SymbolResult] = []
         for symbol in self._config.universe:
-            result = self._process_symbol_safely(symbol)
+            try:
+                result = self._process_symbol_safely(symbol)
+            except BaseException as exc:
+                # KeyboardInterrupt is not an Exception, so the isolation
+                # boundary inside _process_symbol_safely cannot catch it. It can
+                # land inside submission, when an order may already be live at
+                # the venue -- and escaping here before _record ran would leave
+                # the pass with no trace of the attempt at all. Record what is
+                # known, then let the signal continue unwinding.
+                log.warning("pass %s interrupted while processing %s", run_id, symbol)
+                self._record(
+                    SymbolResult(
+                        symbol=symbol,
+                        outcome=Outcome.EXECUTION_AMBIGUOUS,
+                        detail=(
+                            f"interrupted during processing: {type(exc).__name__}; "
+                            f"an order for this symbol may be live at the venue"
+                        ),
+                    ),
+                    run_id,
+                )
+                raise
             self._record(result, run_id)
             log.info("%-6s %-18s %s", result.symbol, result.outcome.value, result.detail)
             results.append(result)

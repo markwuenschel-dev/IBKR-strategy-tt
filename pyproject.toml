@@ -65,3 +65,9 @@ ignore = ["UP042"]
 "tests/fakes.py" = ["ARG002"]
 "tests/test_broker_encoding.py" = ["ARG002"]
 "tests/test_pending_orders.py" = ["ARG002"]
+# Test doubles must accept the full vendor signature even where the body
+# ignores an argument; same reason as the entries above.
+"tests/test_broker_outcomes.py" = ["ARG002"]
+"tests/test_scanner_units.py" = ["ARG002"]
+"tests/test_durability.py" = ["ARG002"]
+"tests/test_cli_lifecycle.py" = ["ARG001", "ARG002", "ARG005"]
