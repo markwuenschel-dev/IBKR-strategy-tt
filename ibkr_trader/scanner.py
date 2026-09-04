@@ -79,13 +79,19 @@ UNDERLYING_GENERIC_TICKS = "104,106"
 QUOTE_WAIT_SECONDS = 6.0
 QUOTE_POLL_SECONDS = 0.25
 
-#: Strike window around spot, as a fraction of the underlying price.
+#: Strike window above spot, as a fraction of the underlying price.
 #:
 #: The strategy sells puts at 0.20-0.40 delta and buys a fixed width below, so
 #: strikes far from spot can never be selected. Quoting them would consume the
 #: line budget to produce rows the algorithm discards. Asymmetric because the
 #: chain is puts-only: the useful strikes sit below spot.
-STRIKE_WINDOW_ABOVE = 0.10
+#:
+#: Zero, because a put at or above spot is in the money with a delta past 0.50
+#: and can never reach the 0.20-0.40 short band -- so every line spent above
+#: spot is spent on a row the algorithm always discards, which is exactly the
+#: waste this window exists to prevent. Spot itself stays inside the window so
+#: an at-the-money listed strike is still quoted.
+STRIKE_WINDOW_ABOVE = 0.0
 
 #: Lookback used for IV rank, and the realized-volatility window of the proxy.
 IV_HISTORY_DURATION = "1 Y"
@@ -219,6 +225,21 @@ def _percentile_rank(current: float, series: Sequence[float]) -> float | None:
     if high - low <= 0:
         return None
     return max(0.0, min(100.0, 100.0 * (current - low) / (high - low)))
+
+
+def _whole_contracts(quantity: float) -> int:
+    """Round a reported size away from zero.
+
+    A fractional holding is still a holding. ``int()`` truncates 0.5 to 0, which
+    drops the position from the portfolio entirely and hides it from the
+    duplicate-symbol guard and the concentration limit -- and "is there exposure
+    in this symbol" is the only question this number is read to answer. Whole
+    sizes are unchanged.
+    """
+    if quantity == 0:
+        return 0
+    magnitude = math.ceil(abs(quantity))
+    return magnitude if quantity > 0 else -magnitude
 
 
 class IBKRMarketData:
@@ -371,13 +392,14 @@ class IBKRMarketData:
         for raw in raw_positions:
             contract = getattr(raw, "contract", None)
             symbol = getattr(contract, "symbol", "") or ""
-            quantity = _finite(getattr(raw, "position", None))
-            if not symbol or quantity is None or int(quantity) == 0:
+            reported = _finite(getattr(raw, "position", None))
+            quantity = _whole_contracts(reported) if reported is not None else 0
+            if not symbol or quantity == 0:
                 continue
             positions.append(
                 Position(
                     symbol=symbol,
-                    quantity=int(quantity),
+                    quantity=quantity,
                     description=getattr(contract, "localSymbol", "") or symbol,
                 )
             )
@@ -431,14 +453,14 @@ class IBKRMarketData:
             if not self._is_active(trade):
                 continue
             symbol = getattr(getattr(trade, "contract", None), "symbol", "") or ""
-            quantity = _finite(getattr(order, "totalQuantity", None)) or 0.0
-            if not symbol or int(quantity) == 0:
+            quantity = _whole_contracts(_finite(getattr(order, "totalQuantity", None)) or 0.0)
+            if not symbol or quantity == 0:
                 continue
             status = getattr(getattr(trade, "orderStatus", None), "status", "") or "working"
             pending.append(
                 Position(
                     symbol=symbol,
-                    quantity=int(quantity),
+                    quantity=quantity,
                     description=f"working order ({status})",
                     pending=True,
                 )
@@ -522,15 +544,21 @@ class IBKRMarketData:
     def _underlying_price(self, symbol: str, ticker: Any) -> Decimal:
         """Pick the most defensible price available from an underlying ticker.
 
-        Order is last trade, then previous close, then bid/ask midpoint. Last
+        Order is last trade, then bid/ask midpoint, then previous close. Last
         trade first because that is the price a strike selection should be
         measured against; the midpoint is the outside-hours fallback and the
         close is what remains when the book is empty.
+
+        The midpoint precedes the close deliberately. A live two-sided book is
+        the current price; the close is the previous session's. Ranking the
+        close first meant selecting strikes against yesterday, which is what
+        this ordering exists to avoid -- the code used to contradict the
+        sentence above it.
         """
         candidates = (
             _finite(getattr(ticker, "last", None)),
-            _finite(getattr(ticker, "close", None)),
             self._midpoint(ticker),
+            _finite(getattr(ticker, "close", None)),
         )
         for value in candidates:
             if value is not None and value > 0:
@@ -770,15 +798,28 @@ class IBKRMarketData:
         collected: list[Any] = []
         try:
             for batch in _chunks(contracts, limit):
-                tickers = [
-                    ib.reqMktData(contract, generic_ticks, False, False) for contract in batch
-                ]
+                # Track what was actually opened rather than assuming the whole
+                # batch was: a reqMktData that raises part-way through leaves
+                # every earlier line of the batch open, and the old list
+                # comprehension ran outside the try, so those lines leaked.
+                opened: list[Any] = []
                 try:
+                    tickers = []
+                    for contract in batch:
+                        tickers.append(ib.reqMktData(contract, generic_ticks, False, False))
+                        opened.append(contract)
                     self._await_quotes(ib, tickers)
                     collected.extend(tickers)
                 finally:
-                    for contract in batch:
-                        ib.cancelMktData(contract)
+                    for contract in opened:
+                        # One cancel that raises must not skip the rest, or the
+                        # remainder of the batch leaks for the same reason.
+                        try:
+                            ib.cancelMktData(contract)
+                        except Exception:
+                            logger.exception(
+                                "Failed to cancel a market-data line for %r", contract
+                            )
         except Exception as exc:
             logger.exception("Market data request failed for %d contracts", len(contracts))
             raise MarketDataError(f"Cannot obtain market data: {exc}") from exc

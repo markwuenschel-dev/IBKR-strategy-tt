@@ -17,7 +17,6 @@ from ibkr_trader.store import SqliteStore
 from .fakes import StubMarketData, tradable_snapshot
 from .harness import build_runner
 
-
 # --- INT-035 -------------------------------------------------------------
 
 
@@ -90,9 +89,7 @@ def test_an_interrupt_mid_pass_still_records_the_attempt(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         runner.run_once()
 
-    rows = store._conn.execute(
-        "SELECT symbol, outcome FROM symbol_attempts"
-    ).fetchall()
+    rows = store._conn.execute("SELECT symbol, outcome FROM symbol_attempts").fetchall()
     store.close()
 
     assert rows, "the interrupted attempt was never recorded"
