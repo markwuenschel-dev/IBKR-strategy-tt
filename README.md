@@ -109,7 +109,7 @@ additionally reports still-working orders as `Position(pending=True)`, and the
 algorithm counts them as exposure:
 
 ```
-pass 1   SPY   WORKING    1x 753/748 put credit spread @ 1.04
+pass 1   SPY   WORKING    IBKR status PreSubmitted
 pass 2   SPY   NO_TRADE   a working order in SPY is already outstanding
 ```
 
