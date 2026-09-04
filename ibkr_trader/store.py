@@ -89,7 +89,14 @@ _BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class SqliteStore:
-    """SQLite-backed :class:`~ibkr_trader.ports.Store`."""
+    """SQLite-backed :class:`~ibkr_trader.ports.Store`.
+
+    Satisfies that port including ``close()``, which joined the contract after
+    it spent a release with zero callers while the connection leaked.
+    Conformance is checked by ``tests/test_port_conformance.py`` rather than
+    asserted by this sentence -- the previous version of it was a noun phrase
+    describing what the class *is*, which is not a claim anything could check.
+    """
 
     def __init__(self, path: str | Path, clock: Clock | None = None) -> None:
         self._clock = clock or SystemClock()
@@ -118,6 +125,14 @@ class SqliteStore:
 
         Written in a single transaction so a proposal never exists in the record
         without the attempt that produced it.
+
+        Raises:
+            Exception: nothing here is translated into a domain error. A locked
+                database, a full disk, a connection already closed, or a value
+                JSON cannot encode all propagate as whatever ``sqlite3`` or
+                ``json`` raised. That is why ``runner.py`` guards the call with
+                a blanket handler -- losing the audit row is preferable to
+                losing the pass, but the caller has to know to make that choice.
         """
         proposal = result.proposal
         review = result.review

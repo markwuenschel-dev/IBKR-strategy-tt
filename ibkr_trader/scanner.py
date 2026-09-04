@@ -379,6 +379,14 @@ class IBKRMarketData:
         and open positions from the position stream. Both are already-subscribed
         client state, so this costs no market-data line.
 
+        The underlying-symbol keying and the working-order synthesis below are
+        both obligations of :meth:`~ibkr_trader.ports.MarketData.portfolio`, not
+        choices this adapter makes. They are restated here because this is where
+        they are *implemented*; the port is where they are *required*. They used
+        to be stated only here, which meant any other conforming implementation
+        -- including the suite's own default double -- could omit them and
+        silently disable the duplicate-order guard.
+
         Positions are keyed by *underlying* symbol, not by option local symbol:
         the concentration limits the algorithm applies are per underlying, so a
         short put on SPY must count as a SPY position.
