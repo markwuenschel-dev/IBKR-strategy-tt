@@ -5,14 +5,22 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # Report every interpreter's result; one red version must not hide another.
+      fail-fast: false
+      matrix:
+        # requires-python declares >= 3.11, so 3.11 is tested, not just assumed.
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
+      # The broker extra is installed so the ib_async wire surface is exercised
+      # by the encoding tests rather than asserted only against a local stub.
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,broker]"
 
       - name: Lint
         run: ruff check .
@@ -24,10 +32,23 @@ jobs:
       # takes time from an injected clock, and needs no network -- so it can
       # never legitimately skip. `--strict-markers` plus an explicit skip check
       # below stops it being quietly neutered.
+      #
+      # `shell: bash` is load-bearing. Without it GitHub runs the step under
+      # `bash -e` with no `pipefail`, so `pytest | tee mission.log` reported
+      # tee's exit status and a *failing* mission test passed this gate. pytest's
+      # own status is now captured directly and the pipe is gone entirely, so the
+      # gate no longer depends on the runner's implicit shell flags.
       - name: Mission test
+        shell: bash
         run: |
-          python -m pytest tests/test_mission.py -v --no-header -rA \
-            | tee mission.log
+          set -euo pipefail
+          status=0
+          python -m pytest tests/test_mission.py -v --no-header -rA > mission.log 2>&1 || status=$?
+          cat mission.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The mission test failed."
+            exit "$status"
+          fi
           if grep -qE "SKIPPED|no tests ran" mission.log; then
             echo "::error::The mission test must never skip."
             exit 1

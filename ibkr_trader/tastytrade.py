@@ -70,23 +70,25 @@ def _select_expiry(snapshot: MarketSnapshot, strategy: StrategyConfig) -> date |
     return candidates[0][0]
 
 
-def _select_short_put(
+def _rank_short_puts(
     puts: tuple[OptionQuote, ...], strategy: StrategyConfig
-) -> OptionQuote | None:
-    """Pick the short strike closest to the target delta within the band.
+) -> tuple[OptionQuote, ...]:
+    """Rank every short-strike candidate in the delta band, best first.
 
     Put deltas are negative; the band is expressed in absolute terms. Ties break
     toward the lower strike (further out of the money, the safer side).
+
+    Every candidate is returned, not only the best one: a candidate whose
+    partner strike is missing, or whose either leg is illiquid, must not end the
+    search while tradable alternatives remain in the band.
     """
     candidates = [
         put
         for put in puts
         if strategy.min_short_delta <= abs(put.delta) <= strategy.max_short_delta
     ]
-    if not candidates:
-        return None
     candidates.sort(key=lambda p: (abs(abs(p.delta) - strategy.short_delta_target), p.strike))
-    return candidates[0]
+    return tuple(candidates)
 
 
 def _liquidity_failure(quote: OptionQuote, strategy: StrategyConfig) -> str | None:
@@ -113,18 +115,52 @@ def _liquidity_failure(quote: OptionQuote, strategy: StrategyConfig) -> str | No
 
 def _position_size(
     max_loss_per_contract: Decimal, portfolio: Portfolio, risk: RiskConfig
-) -> int:
-    """Contracts to trade, bounded by risk budget, buying power and hard cap.
+) -> tuple[int, str]:
+    """Contracts to trade, and the name of the ceiling that bound.
 
-    Returns 0 when a single contract already exceeds the per-trade risk budget,
-    which the caller reports as a no-trade rather than rounding up to one.
+    Three independent ceilings apply -- the per-trade risk budget, available
+    buying power, and the hard contract cap -- and any of them can be the one
+    that produces zero. Returning which one bound lets the caller state the true
+    reason for a refusal instead of attributing every refusal to the budget.
+
+    Returns 0 when a single contract already exceeds the tightest ceiling, which
+    the caller reports as a no-trade rather than rounding up to one.
     """
     if max_loss_per_contract <= 0:
-        return 0
+        return 0, "defined risk"
     budget = portfolio.net_liquidation * Decimal(str(risk.max_risk_per_trade))
-    by_risk = int(budget // max_loss_per_contract)
-    by_buying_power = int(portfolio.buying_power // max_loss_per_contract)
-    return max(0, min(by_risk, by_buying_power, risk.max_contracts))
+    # Ordered most-meaningful first, so a tie is attributed to the risk budget.
+    ceilings = (
+        (int(budget // max_loss_per_contract), "risk budget"),
+        (int(portfolio.buying_power // max_loss_per_contract), "buying power"),
+        (risk.max_contracts, "contract cap"),
+    )
+    quantity, binding = min(ceilings, key=lambda ceiling: ceiling[0])
+    return max(0, quantity), binding
+
+
+def _sizing_refusal(
+    binding: str,
+    max_loss_per_contract: Decimal,
+    portfolio: Portfolio,
+    risk: RiskConfig,
+) -> str:
+    """Explain a zero-contract result in terms of the ceiling that produced it."""
+    if binding == "buying power":
+        return (
+            f"defined risk {max_loss_per_contract} per contract exceeds available "
+            f"buying power {portfolio.buying_power}"
+        )
+    if binding == "contract cap":
+        return f"the contract cap is {risk.max_contracts}, so no position can be opened"
+    if binding == "defined risk":
+        return "defined risk per contract is not positive; the spread cannot be sized"
+    budget = portfolio.net_liquidation * Decimal(str(risk.max_risk_per_trade))
+    return (
+        f"defined risk {max_loss_per_contract} per contract exceeds the "
+        f"{risk.max_risk_per_trade:.1%} per-trade budget ({budget}) on "
+        f"{portfolio.net_liquidation} net liquidation"
+    )
 
 
 def evaluate(
@@ -182,49 +218,72 @@ def evaluate(
     if not puts:
         return NoTrade(f"no put quotes for {expiry.isoformat()}")
 
-    # --- short strike ---
-    short_put = _select_short_put(puts, strategy)
-    if short_put is None:
+    # --- short strike, its partner, and liquidity, with backtracking ---
+    #
+    # The candidates are tried in preference order rather than committing to the
+    # single best delta: a missing partner or an illiquid leg disqualifies that
+    # candidate, not the whole symbol, while tradable alternatives remain.
+    candidates = _rank_short_puts(puts, strategy)
+    if not candidates:
         return NoTrade(
             f"no {dte}-DTE short put between {strategy.min_short_delta:.2f} and "
             f"{strategy.max_short_delta:.2f} delta"
         )
 
-    # --- long strike defines the risk ---
-    long_strike = short_put.strike - strategy.spread_width
-    long_put = next((p for p in puts if p.strike == long_strike), None)
-    if long_put is None:
-        return NoTrade(
-            f"no put at {long_strike} to define a {strategy.spread_width}-wide "
-            f"spread below the {short_put.strike} short strike"
+    pair: tuple[OptionQuote, OptionQuote] | None = None
+    first_failure: str | None = None
+    for candidate in candidates:
+        long_strike = candidate.strike - strategy.spread_width
+        partner = next((p for p in puts if p.strike == long_strike), None)
+        if partner is None:
+            first_failure = first_failure or (
+                f"no put at {long_strike} to define a {strategy.spread_width}-wide "
+                f"spread below the {candidate.strike} short strike"
+            )
+            continue
+        failure = _liquidity_failure(candidate, strategy) or _liquidity_failure(
+            partner, strategy
         )
-
-    # --- liquidity, both legs ---
-    for leg_quote in (short_put, long_put):
-        failure = _liquidity_failure(leg_quote, strategy)
         if failure is not None:
-            return NoTrade(failure)
+            # The preferred candidate's failure is the one the operator asked about.
+            first_failure = first_failure or failure
+            continue
+        pair = (candidate, partner)
+        break
+
+    if pair is None:
+        return NoTrade(first_failure or "no tradable spread in the delta band")
+    short_put, long_put = pair
 
     # --- premium must justify the risk ---
-    credit = _round_credit(short_put.mid - long_put.mid)
-    if credit <= 0:
+    #
+    # The ratio is tested on the unrounded credit. Rounding down first makes the
+    # screen strictly stricter than the configured minimum, rejecting spreads
+    # the configuration accepts; only the order's price is rounded, because the
+    # rounded figure is what can actually be collected.
+    raw_credit = short_put.mid - long_put.mid
+    if raw_credit <= 0:
         return NoTrade(f"{short_put.strike}/{long_put.strike} put spread offers no net credit")
-    credit_ratio = float(credit / strategy.spread_width)
+    credit_ratio = float(raw_credit / strategy.spread_width)
     if credit_ratio < strategy.min_credit_ratio:
         return NoTrade(
-            f"credit {credit} is {credit_ratio:.1%} of the {strategy.spread_width}-wide "
-            f"spread, below the {strategy.min_credit_ratio:.1%} minimum"
+            f"credit {_round_credit(raw_credit)} is {credit_ratio:.1%} of the "
+            f"{strategy.spread_width}-wide spread, below the "
+            f"{strategy.min_credit_ratio:.1%} minimum"
+        )
+
+    credit = _round_credit(raw_credit)
+    if credit <= 0:
+        return NoTrade(
+            f"{short_put.strike}/{long_put.strike} put spread credit rounds to zero "
+            f"at a {TICK} tick"
         )
 
     # --- defined risk and sizing ---
     max_loss_per_contract = (strategy.spread_width - credit) * CONTRACT_MULTIPLIER
-    quantity = _position_size(max_loss_per_contract, portfolio, risk)
+    quantity, binding = _position_size(max_loss_per_contract, portfolio, risk)
     if quantity < 1:
-        return NoTrade(
-            f"defined risk {max_loss_per_contract} per contract exceeds the "
-            f"{risk.max_risk_per_trade:.1%} per-trade budget on "
-            f"{portfolio.net_liquidation} net liquidation"
-        )
+        return NoTrade(_sizing_refusal(binding, max_loss_per_contract, portfolio, risk))
 
     max_loss = max_loss_per_contract * quantity
     max_profit = credit * CONTRACT_MULTIPLIER * quantity

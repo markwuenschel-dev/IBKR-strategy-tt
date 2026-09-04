@@ -3,19 +3,22 @@ title: "Programming Principles"
 category: topic
 status: current
 summary: "Engineering principles for abstract, type-guided, declarative, combinatoric, pipeline-oriented, parallel, and adaptive code: factories/registries/schemas as the evolution surface, typed boundaries and lineage as the safety surface, gates at promotion."
-related:
-  - docs/programming-guidelines.md
-  - docs/05-quant-engine.md
-  - docs/conformance/determinism-tiers.md
-  - docs/promotion-gates.md
-  - docs/01-architecture-anchor.md
 ---
+
+> **Imported reference material.** This document descends from a larger
+> engineering handbook and refers throughout to companion documents --
+> programming-guidelines, 05-quant-engine, conformance/determinism-tiers,
+> promotion-gates and 01-architecture-anchor -- that are **not part of this
+> repository**. Those names are retained below as prose because they carry the
+> argument, but they are no longer written as links to files that do not exist
+> here. Whether this document belongs in this repository at all is an open
+> question, tracked separately as ARCH-C5.
 
 # Programming Principles
 
 *Engineering principles for abstract, type-guided, declarative, extensible, combinatoric, pipeline-oriented, parallel, and adaptive systems.*
 
-This is the design-philosophy companion to [programming-guidelines.md](programming-guidelines.md): the guidelines say what the live code concretely does (layout, chokepoints, idioms, testing); this document says how code is *shaped* — the principles reviews apply when the question is "is this the right design?", not "does this follow the house style?". Descends from Programming Guidelines v3.2.
+This is the design-philosophy companion to `programming-guidelines.md`: the guidelines say what the live code concretely does (layout, chokepoints, idioms, testing); this document says how code is *shaped* — the principles reviews apply when the question is "is this the right design?", not "does this follow the house style?". Descends from Programming Guidelines v3.2.
 
 > **Change in v3.2 — read this.** Section 6 is reworked. The old "nothing is done until it is fully gated" rule applied the *promotion* bar to *every capability from its first line*, forcing each small task to carry a full evidence-emission tax. Gates now apply at **promotion**, not as the definition of "done." Cheap correctness invariants stay always-on; the heavy validation battery moves to the promotion boundary and is built **once** in the harness. §7.2 is scoped accordingly. Everything else is the same principles, compressed.
 
@@ -53,9 +56,9 @@ The system stays point-in-time correct, reproducible within its declared determi
 
 **4.2 Fixed-dimensional interfaces with masking.** Prefer fixed-shape tensors/vectors with masks over dynamic resizing — for replay compatibility, caching, planning simplicity, and fast CPU/GPU kernels. Use dynamic structure only where structurally necessary and outside hot surfaces.
 
-**4.3 Point-in-time discipline.** All market, fundamental, and macro access flows through the PIT front door (`DataView.as_of(T)`, see [05-quant-engine.md](05-quant-engine.md)) enforcing `valid_time ≤ T` and `knowledge_time ≤ T`. No direct raw-dataset access in strategy, planner, feature, or evaluator code. This is an architecturally enforced boundary, not a convention — make a non-PIT access a *type* error wherever the type system allows it. It is the single defense against lookahead.
+**4.3 Point-in-time discipline.** All market, fundamental, and macro access flows through the PIT front door (`DataView.as_of(T)`, see `05-quant-engine.md`) enforcing `valid_time ≤ T` and `knowledge_time ≤ T`. No direct raw-dataset access in strategy, planner, feature, or evaluator code. This is an architecturally enforced boundary, not a convention — make a non-PIT access a *type* error wherever the type system allows it. It is the single defense against lookahead.
 
-**4.4 Determinism tiers.** Every pipeline declares its tier ([determinism-tiers.md](conformance/determinism-tiers.md) is authoritative for the D0–D3 definitions) in metadata. Use hierarchical seed derivation, deterministic ordering, explicit partitioning, and stable aggregation. Not deterministic within the required tier ⇒ not promotable.
+**4.4 Determinism tiers.** Every pipeline declares its tier (`determinism-tiers.md` is authoritative for the D0–D3 definitions) in metadata. Use hierarchical seed derivation, deterministic ordering, explicit partitioning, and stable aggregation. Not deterministic within the required tier ⇒ not promotable.
 
 **4.5 Value semantics.** Manifests, IR nodes, plans, descriptors, and artifact metadata are immutable. Mutation is explicit, local, and isolated from the core. No hidden mutation across planning or execution boundaries.
 
@@ -72,11 +75,11 @@ The system stays point-in-time correct, reproducible within its declared determi
 **6.1 Two boundaries, not one.** Separate *done* from *promotable*:
 
 - **Done (development).** The code is typed, correct, and passes its **cheap always-on invariants** (§6.2). That is the whole bar. A capability is complete without emitting any promotion evidence. Build, explore, and iterate here.
-- **Promotable (production).** The heavyweight evidence battery — statistical validity, cost realism, meta-validity, execution integrity — is required **only when promoting a strategy or model toward production** (see [promotion-gates.md](promotion-gates.md)).
+- **Promotable (production).** The heavyweight evidence battery — statistical validity, cost realism, meta-validity, execution integrity — is required **only when promoting a strategy or model toward production** (see `promotion-gates.md`).
 
 The retired rule ("if it cannot be gated, it is not done") applied the promotion bar to every capability from its first line. That is an upfront tax that strangles exploration: you build evidence harnesses instead of shipping capabilities. Gate at the promotion boundary; keep development fast.
 
-**6.2 Cheap invariants, always on.** Property-based tests for what is catastrophic *and* cheap to check: leakage, PIT boundaries, determinism, schema/IR round-trips, hash stability, planner/executor idempotence, monotonicity, and stability bounds. These run continuously, cost little, and are the real safety net during development. Invariants are authoritative; examples support them. (This is the principle behind the delivery rule "the gate ships with the feature" in [programming-guidelines.md](programming-guidelines.md): the tests and CI enforcement that ship with a PR are these cheap invariants, not the promotion battery.)
+**6.2 Cheap invariants, always on.** Property-based tests for what is catastrophic *and* cheap to check: leakage, PIT boundaries, determinism, schema/IR round-trips, hash stability, planner/executor idempotence, monotonicity, and stability bounds. These run continuously, cost little, and are the real safety net during development. Invariants are authoritative; examples support them. (This is the principle behind the delivery rule "the gate ships with the feature" in `programming-guidelines.md`: the tests and CI enforcement that ship with a PR are these cheap invariants, not the promotion battery.)
 
 **6.3 Build the gate once.** Promotion evidence is emitted by the **shared promotion harness** (planner/evaluator level), not re-implemented per capability. Adding a signal or transform must never mean wiring up six kinds of evidence emission. If promotion needs a new kind of evidence, it goes in the harness, once.
 
