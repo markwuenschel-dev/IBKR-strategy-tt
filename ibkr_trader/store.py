@@ -81,6 +81,13 @@ CREATE INDEX IF NOT EXISTS idx_fills_proposal ON fills (proposal_id);
 """
 
 
+#: How long a competing writer waits for the lock before giving up.
+#:
+#: Passed to :func:`sqlite3.connect` and set as ``busy_timeout`` so both the
+#: Python driver and SQLite itself wait rather than failing instantly.
+_BUSY_TIMEOUT_SECONDS = 5.0
+
+
 class SqliteStore:
     """SQLite-backed :class:`~ibkr_trader.ports.Store`."""
 
@@ -88,8 +95,17 @@ class SqliteStore:
         self._clock = clock or SystemClock()
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._path)
+        self._conn = sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_SECONDS)
         self._conn.row_factory = sqlite3.Row
+        # Nothing stops a second process being pointed at the same database.
+        # On the default rollback journal that second writer gets `database is
+        # locked` immediately -- sqlite3's default busy_timeout is 0 -- and the
+        # runner logs the failure and carries on, so the outcome is lost with
+        # only a log line to show for it. WAL lets a reader and a writer
+        # coexist; the busy timeout makes a competing writer wait for the lock
+        # instead of failing instantly.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(f"PRAGMA busy_timeout={int(_BUSY_TIMEOUT_SECONDS * 1000)}")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
