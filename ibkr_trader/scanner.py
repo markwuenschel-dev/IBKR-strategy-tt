@@ -6,7 +6,7 @@ deliberately the *only* place in the system that knows what a ``Ticker``, an
 ``OptionChain`` or a NaN price is; everything downstream sees exact ``Decimal``
 prices and finished quotes.
 
-Three properties are load-bearing:
+Four properties are load-bearing:
 
 *Nothing survives the call.* There is no cache, no background subscription, no
 reconnection daemon and no module-level state. Every market-data line this
@@ -28,6 +28,15 @@ by the caller so the broker adapter and this adapter share one client, one
 client id, and one lifecycle. Connecting here would give the process two
 half-owned sockets and no single place to close them.
 
+*The vendor module is injected too, not only the client.* Reading the account,
+position and order streams needs the connection alone, but qualifying an
+underlying and building a chain need ``ib_async`` itself, to **construct**
+contracts. Those constructors arrive through ``api``, defaulting to the real
+import, exactly as :class:`~ibkr_trader.broker.IBKRBroker` takes its own
+``api``. Without that seam the two contract-building methods — and therefore
+:meth:`IBKRMarketData.snapshot`, which calls both — are unreachable on a
+machine where the package is not installed.
+
 ``ib_async`` is imported lazily, at call time. Importing this module must not
 require the package: the configuration, algorithm and mission tests all import
 the package tree without ever touching a broker.
@@ -40,7 +49,7 @@ import math
 from collections.abc import Iterator, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Protocol
 
 from .clock import Clock
 from .config import IBKRConfig, StrategyConfig
@@ -113,7 +122,26 @@ BUYING_POWER_TAGS = ("BuyingPower", "AvailableFunds")
 ACCOUNT_CURRENCIES = ("BASE", CURRENCY)
 
 
-def _require_ib_async() -> Any:
+class MarketDataApi(Protocol):
+    """The ``ib_async`` module surface used to build market-data contracts.
+
+    Deliberately separate from :class:`~ibkr_trader.broker.IBApi`, which names
+    the constructors the *order* path needs. The two adapters ask the same
+    vendor module for different things, and sharing one declaration here would
+    make each adapter depend on the other's requirements — the coupling a
+    single venue-translation owner would have to resolve deliberately, not by
+    accident.
+
+    Only the constructors belong here. The connected client arrives separately
+    as ``ib``, because reading account, position and order state needs the
+    connection but not the module.
+    """
+
+    Stock: Any
+    Option: Any
+
+
+def _require_ib_async() -> MarketDataApi:
     """Import ``ib_async`` at call time, or fail as a market-data error.
 
     Deferred so ``import ibkr_trader.scanner`` costs nothing and works in an
@@ -259,6 +287,9 @@ class IBKRMarketData:
             quotes; nothing in this module calls ``datetime.now``.
         ib: A connected ``ib_async.IB``. Injected so the broker adapter and this
             adapter share one connection, and so tests can substitute a double.
+        api: The ``ib_async`` module surface used to construct contracts.
+            Defaults to importing it at first use. Injecting it is what keeps
+            the contract-building path reachable without the package installed.
     """
 
     def __init__(
@@ -267,11 +298,13 @@ class IBKRMarketData:
         strategy_config: StrategyConfig,
         clock: Clock,
         ib: Any | None = None,
+        api: MarketDataApi | None = None,
     ) -> None:
         self._ibkr_config = ibkr_config
         self._strategy_config = strategy_config
         self._clock = clock
         self._ib = ib
+        self._api = api
 
     # ------------------------------------------------------------------
     # MarketData protocol
@@ -333,7 +366,6 @@ class IBKRMarketData:
             symbol=symbol,
             underlying_price=underlying_price,
             iv_rank=iv_rank,
-            implied_volatility=implied_volatility,
             as_of=as_of,
             chain=chain,
         )
@@ -345,6 +377,14 @@ class IBKRMarketData:
         ``AvailableFunds``) from the account-value stream the client maintains,
         and open positions from the position stream. Both are already-subscribed
         client state, so this costs no market-data line.
+
+        The underlying-symbol keying and the working-order synthesis below are
+        both obligations of :meth:`~ibkr_trader.ports.MarketData.portfolio`, not
+        choices this adapter makes. They are restated here because this is where
+        they are *implemented*; the port is where they are *required*. They used
+        to be stated only here, which meant any other conforming implementation
+        -- including the suite's own default double -- could omit them and
+        silently disable the duplicate-order guard.
 
         Positions are keyed by *underlying* symbol, not by option local symbol:
         the concentration limits the algorithm applies are per underlying, so a
@@ -499,6 +539,12 @@ class IBKRMarketData:
             )
         return self._ib
 
+    def _require_api(self) -> MarketDataApi:
+        """The ``ib_async`` constructor surface, imported on first use."""
+        if self._api is None:
+            self._api = _require_ib_async()
+        return self._api
+
     def _apply_market_data_type(self, ib: Any) -> None:
         """Select live, frozen or delayed quotes for this scan.
 
@@ -525,9 +571,9 @@ class IBKRMarketData:
         The conId is not optional convenience: ``reqSecDefOptParams`` is keyed by
         it, so an unqualified underlying yields no chain at all.
         """
-        ib_async = _require_ib_async()
+        api = self._require_api()
         try:
-            stock = ib_async.Stock(symbol, EXCHANGE, CURRENCY)
+            stock = api.Stock(symbol, EXCHANGE, CURRENCY)
             qualified = ib.qualifyContracts(stock)
         except Exception as exc:
             logger.exception("Failed to qualify underlying %s", symbol)
@@ -598,7 +644,7 @@ class IBKRMarketData:
         quotes is the whole point — a post-filter would still have paid for
         every line.
         """
-        ib_async = _require_ib_async()
+        api = self._require_api()
         try:
             chains = ib.reqSecDefOptParams(
                 underlying.symbol,
@@ -630,7 +676,7 @@ class IBKRMarketData:
 
         trading_class = getattr(chain, "tradingClass", "") or symbol
         candidates = [
-            ib_async.Option(
+            api.Option(
                 symbol,
                 expiry.strftime("%Y%m%d"),
                 strike,

@@ -10,6 +10,7 @@ Each double records what it was asked to do, so tests can assert on *absence*
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -21,6 +22,7 @@ from ibkr_trader.models import (
     OptionQuote,
     Outcome,
     Portfolio,
+    Position,
     ReviewDecision,
     Right,
     TradeProposal,
@@ -57,6 +59,14 @@ class StubMarketData:
 
     Symbol lookup is explicit: an unconfigured symbol raises rather than
     returning empty data, so a test cannot pass by accident.
+
+    ``working_orders`` exists because :meth:`ibkr_trader.ports.MarketData.portfolio`
+    obliges every implementation to report orders still working at the broker as
+    ``pending`` positions. This double is the suite-wide default, so if it could
+    not express that obligation, the default substitute would be one that
+    silently disables the duplicate-order guard -- which is exactly what it was
+    before, and why ``test_pending_orders.py`` had to hand-replicate the real
+    adapter's synthesis in a local subclass to test the guard at all.
     """
 
     def __init__(
@@ -64,12 +74,14 @@ class StubMarketData:
         snapshots: dict[str, MarketSnapshot] | None = None,
         failures: dict[str, Exception] | None = None,
         portfolio: Portfolio | None = None,
+        working_orders: dict[str, int] | None = None,
     ) -> None:
         self._snapshots = snapshots or {}
         self._failures = failures or {}
         self._portfolio = portfolio or Portfolio(
             net_liquidation=Decimal(50_000), buying_power=Decimal(25_000)
         )
+        self._working_orders = dict(working_orders or {})
         self.requested: list[str] = []
 
     def snapshot(self, symbol: str) -> MarketSnapshot:
@@ -81,7 +93,19 @@ class StubMarketData:
         return self._snapshots[symbol]
 
     def portfolio(self) -> Portfolio:
-        return self._portfolio
+        """Filled holdings plus any still-working orders, as the port requires."""
+        if not self._working_orders:
+            return self._portfolio
+        pending = tuple(
+            Position(
+                symbol=symbol,
+                quantity=quantity,
+                description="working order (Submitted)",
+                pending=True,
+            )
+            for symbol, quantity in self._working_orders.items()
+        )
+        return replace(self._portfolio, positions=self._portfolio.positions + pending)
 
 
 class StubReviewer:
@@ -139,6 +163,8 @@ class FakeBroker:
         self._error = error
         self._connected = connected
         self.submitted: list[TradeProposal] = []
+        self.connect_calls = 0
+        self.disconnect_calls = 0
 
     @property
     def call_count(self) -> int:
@@ -147,6 +173,16 @@ class FakeBroker:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    def connect(self) -> None:
+        """Nothing to establish, but the port declares it and cli.py calls it."""
+        self._connected = True
+        self.connect_calls += 1
+
+    def disconnect(self) -> None:
+        """Idempotent, and counted -- teardown asserts it happened exactly once."""
+        self._connected = False
+        self.disconnect_calls += 1
 
     def submit(self, proposal: TradeProposal) -> ExecutionResult:
         self.submitted.append(proposal)
@@ -230,7 +266,6 @@ def tradable_snapshot(symbol: str = "AAPL", iv_rank: float = 45.0) -> MarketSnap
         symbol=symbol,
         underlying_price=Decimal("195.00"),
         iv_rank=iv_rank,
-        implied_volatility=0.32,
         as_of=SCAN_TIME,
         chain=tuple(chain),
     )
@@ -250,7 +285,6 @@ def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
         symbol=symbol,
         underlying_price=Decimal("195.00"),
         iv_rank=55.0,
-        implied_volatility=0.40,
         as_of=SCAN_TIME,
         chain=tuple(wide),
     )

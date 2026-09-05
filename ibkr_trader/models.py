@@ -11,12 +11,14 @@ untrustworthy. Dimensionless statistics (delta, IV rank) stay ``float``.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 #: Standard equity-option multiplier: one contract covers 100 shares.
 CONTRACT_MULTIPLIER = Decimal(100)
@@ -57,25 +59,43 @@ class Outcome(str, Enum):
     ERROR = "ERROR"
 
 
-#: Outcomes meaning an order is live at the broker in some form.
+#: Outcomes meaning the order reached the venue.
+#:
+#: "Submitted" is about arrival, not about survival. ``BROKER_REJECTED`` belongs
+#: here: the venue saw the order and refused it, which is precisely what
+#: ``SUBMISSION_FAILED`` does *not* mean -- that one never left this process.
+#: Excluding a venue rejection made the operator line read "Orders submitted: 0"
+#: for a pass that really did put an order on the wire.
 SUBMITTED_OUTCOMES = frozenset(
-    {Outcome.ACCEPTED, Outcome.WORKING, Outcome.FILLED, Outcome.EXECUTION_AMBIGUOUS}
+    {
+        Outcome.ACCEPTED,
+        Outcome.WORKING,
+        Outcome.FILLED,
+        Outcome.EXECUTION_AMBIGUOUS,
+        Outcome.BROKER_REJECTED,
+    }
 )
 
 
-@dataclass(frozen=True, slots=True)
-class OptionQuote:
-    """One option contract and its current market, as seen at scan time."""
+class Quoted:
+    """Bid/ask arithmetic, defined once for every type that carries a market.
 
-    symbol: str
-    expiry: date
-    strike: Decimal
-    right: Right
+    Two types carry the same two numbers: :class:`OptionQuote`, which the
+    liquidity screen reads to *select* a contract, and :class:`ProposalLeg`,
+    which travels to the reviewer to *justify* that selection. They described
+    the same market with two implementations that disagreed on the degenerate
+    case, so the figure shown to the reviewer was not always the figure the
+    screen had applied. One definition removes the possibility.
+
+    Mixin rather than a shared dataclass base: both subclasses are frozen,
+    slotted dataclasses with different field sets, and only the derived
+    properties are common to them.
+    """
+
+    __slots__ = ()
+
     bid: Decimal
     ask: Decimal
-    delta: float
-    open_interest: int
-    volume: int
 
     @property
     def mid(self) -> Decimal:
@@ -93,11 +113,33 @@ class OptionQuote:
 
         This is the liquidity screen: a wide relative spread means the fill will
         be poor no matter how attractive the theoretical credit looks.
+
+        Infinity is deliberate and load-bearing. ``tastytrade`` tests
+        ``spread_pct > max_spread_pct``, so a dead book must compare *greater*
+        than any configured bound and be rejected. ``None`` would raise inside
+        the pure algorithm and zero would read as a perfectly tight market. The
+        wire needs a JSON-safe value instead, and :func:`leg_payload` is the one
+        place that converts -- a serialization rule, not a second arithmetic.
         """
         mid = self.mid
         if mid <= 0:
             return float("inf")
         return float(self.spread / mid)
+
+
+@dataclass(frozen=True, slots=True)
+class OptionQuote(Quoted):
+    """One option contract and its current market, as seen at scan time."""
+
+    symbol: str
+    expiry: date
+    strike: Decimal
+    right: Right
+    bid: Decimal
+    ask: Decimal
+    delta: float
+    open_interest: int
+    volume: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +153,6 @@ class MarketSnapshot:
     symbol: str
     underlying_price: Decimal
     iv_rank: float
-    implied_volatility: float
     as_of: datetime
     chain: tuple[OptionQuote, ...]
 
@@ -172,11 +213,13 @@ class Portfolio:
 
 
 @dataclass(frozen=True, slots=True)
-class ProposalLeg:
+class ProposalLeg(Quoted):
     """One leg of a proposed spread, carrying the quote that justified it.
 
     The liquidity fields travel with the leg so the reviewer receives the actual
-    market that was used, not a re-derived approximation of it.
+    market that was used, not a re-derived approximation of it -- and, since the
+    derived figures now come from :class:`Quoted`, not a re-derived
+    approximation of the *derived* numbers either.
     """
 
     action: Action
@@ -289,3 +332,45 @@ class SymbolResult:
     proposal: TradeProposal | None = None
     review: ReviewDecision | None = None
     execution: ExecutionResult | None = None
+
+
+def leg_payload(leg: ProposalLeg, *, derived: bool = False) -> dict[str, Any]:
+    """The wire shape of one leg -- the only definition of it.
+
+    Two serializers used to maintain this list of fields by hand: the reviewer's
+    JSON payload and the store's ``legs_json`` column. They had already drifted
+    by three keys, and nothing would have noticed if they drifted by a fourth or
+    started disagreeing about how a shared one was computed.
+
+    They are still allowed to differ in *content* -- the reviewer needs the
+    derived liquidity figures to judge a fill, the audit row does not -- so
+    ``derived`` selects which. What they can no longer differ in is arithmetic.
+
+    Prices are rendered as strings so a ``Decimal`` round-trips exactly through
+    JSON. ``spread_pct`` is the exception: it is genuinely a ratio, and it is
+    ``None`` rather than infinity when the book is dead, because ``inf`` is not
+    valid JSON. That conversion happens here and nowhere else -- the domain
+    value stays infinite, which is what makes the liquidity screen reject.
+    """
+    payload: dict[str, Any] = {
+        "action": leg.action.value,
+        "right": leg.right.value,
+        "strike": str(leg.strike),
+        "expiry": leg.expiry.isoformat(),
+        "ratio": leg.ratio,
+        "bid": str(leg.bid),
+        "ask": str(leg.ask),
+        "delta": leg.delta,
+        "open_interest": leg.open_interest,
+        "volume": leg.volume,
+    }
+    if not derived:
+        return payload
+
+    spread_pct = leg.spread_pct
+    return {
+        **payload,
+        "mid": str(leg.mid),
+        "spread": str(leg.spread),
+        "spread_pct": None if math.isinf(spread_pct) else spread_pct,
+    }

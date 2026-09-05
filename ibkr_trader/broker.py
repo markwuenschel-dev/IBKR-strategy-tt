@@ -185,6 +185,12 @@ def _rejection_text(trade: Any) -> str:
 class IBKRBroker:
     """Submits vertical spreads to IBKR as single combo (``BAG``) orders.
 
+    Satisfies :class:`~ibkr_trader.ports.Broker`, checked by
+    ``tests/test_port_conformance.py`` rather than asserted here: structure,
+    signatures, and the documented ``Raises:`` block all have to agree with the
+    port. Said on the class because the claim used to live in the module
+    docstring 180 lines above and never named the class it was about.
+
     Sign convention -- the single easiest thing here to get backwards:
 
     The bag is **always bought**, and its legs are always written exactly as the

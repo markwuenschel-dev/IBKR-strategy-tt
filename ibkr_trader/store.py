@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .clock import Clock, SystemClock
-from .models import SymbolResult
+from .models import SymbolResult, leg_payload
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbol_attempts (
@@ -89,7 +89,14 @@ _BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class SqliteStore:
-    """SQLite-backed :class:`~ibkr_trader.ports.Store`."""
+    """SQLite-backed :class:`~ibkr_trader.ports.Store`.
+
+    Satisfies that port including ``close()``, which joined the contract after
+    it spent a release with zero callers while the connection leaked.
+    Conformance is checked by ``tests/test_port_conformance.py`` rather than
+    asserted by this sentence -- the previous version of it was a noun phrase
+    describing what the class *is*, which is not a claim anything could check.
+    """
 
     def __init__(self, path: str | Path, clock: Clock | None = None) -> None:
         self._clock = clock or SystemClock()
@@ -118,6 +125,14 @@ class SqliteStore:
 
         Written in a single transaction so a proposal never exists in the record
         without the attempt that produced it.
+
+        Raises:
+            Exception: nothing here is translated into a domain error. A locked
+                database, a full disk, a connection already closed, or a value
+                JSON cannot encode all propagate as whatever ``sqlite3`` or
+                ``json`` raised. That is why ``runner.py`` guards the call with
+                a blanket handler -- losing the audit row is preferable to
+                losing the pass, but the caller has to know to make that choice.
         """
         proposal = result.proposal
         review = result.review
@@ -238,19 +253,10 @@ class SqliteStore:
 
 
 def _legs_as_json(proposal) -> list[dict[str, Any]]:
-    """Serialize proposal legs, preserving exact decimal prices as strings."""
-    return [
-        {
-            "action": leg.action.value,
-            "right": leg.right.value,
-            "strike": str(leg.strike),
-            "expiry": leg.expiry.isoformat(),
-            "ratio": leg.ratio,
-            "bid": str(leg.bid),
-            "ask": str(leg.ask),
-            "delta": leg.delta,
-            "open_interest": leg.open_interest,
-            "volume": leg.volume,
-        }
-        for leg in proposal.legs
-    ]
+    """Serialize proposal legs, preserving exact decimal prices as strings.
+
+    The audit row carries the raw market only. The derived liquidity figures are
+    reproducible from bid and ask at any time, and storing a second copy of a
+    computed number is how the stored one drifts from the computation.
+    """
+    return [leg_payload(leg) for leg in proposal.legs]
