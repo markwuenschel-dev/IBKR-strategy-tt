@@ -199,12 +199,20 @@ def test_the_payload_reads_the_spread_property_rather_than_recomputing_it(monkey
     assert leg_payload(leg, derived=True)["spread"] == "999"
 
 
-def test_the_payload_reads_the_mid_property_too():
-    """The same claim for the other derived figure the reviewer is shown."""
-    leg = proposal_leg("3.35", "3.45")
+def test_the_payload_reads_the_mid_property_too(monkeypatch):
+    """The same claim for the other derived figure the reviewer is shown.
 
-    assert leg_payload(leg, derived=True)["mid"] == str(leg.mid)
+    Written the same way as the ``spread`` case above, and for the same reason:
+    ``payload["mid"] == str(leg.mid)`` is satisfied by an inline recomputation
+    and proves nothing about who reads what.
+    """
+    leg = proposal_leg("3.35", "3.45")
     assert leg.mid == Decimal("3.40")
+
+    monkeypatch.setattr(models.Quoted, "mid", property(lambda _self: Decimal("777")))
+
+    assert leg.mid == Decimal("777"), "the substitution itself must take effect"
+    assert leg_payload(leg, derived=True)["mid"] == "777"
 
 
 # --- INT-029: a field whose name was true only half the time -------------
