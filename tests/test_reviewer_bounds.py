@@ -17,7 +17,7 @@ from ibkr_trader.config import build_config
 from ibkr_trader.errors import ReviewError
 from ibkr_trader.reviewer import ClaudeReviewer, _response_text
 
-from .fakes import SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME
 from .test_reviewer import PORTFOLIO, StubClient, canonical_proposal
 
 # --- INT-025 -------------------------------------------------------------
@@ -29,6 +29,7 @@ def test_the_request_carries_non_default_bounds():
     config = build_config(
         {
             "universe": ["AAPL"],
+            "ibkr": {"account": ACCOUNT},
             "reviewer": {"timeout_seconds": 12.5, "max_tokens": 4096},
         }
     )
@@ -55,7 +56,7 @@ def test_the_token_budget_leaves_room_for_an_adaptive_thinking_model():
     that small risks every review truncating, which is a permanent
     all-reviews-fail mode rather than an occasional one.
     """
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
 
     assert config.reviewer.max_tokens >= 4096
 

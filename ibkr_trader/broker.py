@@ -22,6 +22,7 @@ that has never talked to TWS, because the rest of the test suite imports it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -104,6 +105,8 @@ class IBClient(Protocol):
     def connect(self, host: str, port: int, clientId: int, timeout: float) -> Any: ...
 
     def disconnect(self) -> None: ...
+
+    def managedAccounts(self) -> list[str]: ...
 
     def qualifyContracts(self, *contracts: Any) -> list[Any]: ...
 
@@ -305,7 +308,66 @@ class IBKRBroker:
             logger.error("IBKR connect to %s returned without a session", target)
             raise BrokerNotConnected(f"connected to {target} but the session is not live")
 
-        logger.info("connected to IBKR at %s (paper=%s)", target, self._config.paper)
+        self._require_configured_account(target)
+        logger.info("connected to IBKR at %s, account %s", target, self._config.account)
+
+    def _require_configured_account(self, target: str) -> None:
+        """Refuse a session that did not reach the account this config names.
+
+        **What this proves, exactly.** That the process reached the account the
+        operator named. It does *not* prove that account is a paper account:
+        IBKR exposes no paper/live indicator anywhere in the handshake, the
+        ``DU`` prefix is a convention it has never documented, and this
+        repository's own verified paper account -- ``DUR318607`` -- does not
+        match the shape people usually assume. Paper safety is therefore an
+        operator-naming discipline that this check enforces as *identity*. No
+        message here may imply more than that.
+
+        Why identity rather than the port: a config copied between machines is
+        the realistic way the wrong book gets traded, and a port number cannot
+        see it. This can.
+
+        The session is closed before the error propagates. Refusing while
+        leaving a live socket open would be worse than not checking, and the
+        caller only learns the session is unusable -- it should not also have to
+        clean up after the check that said so.
+        """
+        try:
+            accounts = [str(a) for a in self._ib.managedAccounts()]
+        except Exception as exc:
+            self._close_quietly()
+            logger.exception("Could not read the account list from %s", target)
+            raise BrokerNotConnected(
+                f"connected to {target} but could not read the account list: {exc}"
+            ) from exc
+
+        if not accounts:
+            self._close_quietly()
+            logger.error("IBKR at %s reported no accounts", target)
+            raise BrokerNotConnected(
+                f"connected to {target} but it reported no accounts, so the "
+                f"configured account {self._config.account!r} cannot be verified"
+            )
+
+        if self._config.account not in accounts:
+            self._close_quietly()
+            logger.error(
+                "IBKR at %s reports accounts %s, not the configured %s",
+                target,
+                accounts,
+                self._config.account,
+            )
+            raise BrokerNotConnected(
+                f"configured account {self._config.account!r} is not among the "
+                f"accounts this session reports ({', '.join(accounts)}); refusing "
+                f"to trade a book that was not named"
+            )
+
+    def _close_quietly(self) -> None:
+        """Drop the session without letting teardown replace the real failure."""
+        with contextlib.suppress(Exception):
+            if self._ib is not None:
+                self._ib.disconnect()
 
     def disconnect(self) -> None:
         """Close the TWS session if one is open.

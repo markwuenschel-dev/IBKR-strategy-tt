@@ -15,6 +15,7 @@ from ibkr_trader.runner import Runner
 from ibkr_trader.store import SqliteStore
 
 from .fakes import (
+    ACCOUNT,
     SCAN_TIME,
     FakeBroker,
     StubMarketData,
@@ -42,6 +43,7 @@ def build_runner(
     settings = {
         "universe": list(universe),
         "database_path": str(tmp_path / "trader.sqlite3"),
+        "ibkr": {"account": ACCOUNT},
     }
     if overrides:
         settings.update(overrides)

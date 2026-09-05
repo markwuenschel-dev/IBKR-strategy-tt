@@ -78,7 +78,29 @@ Invalid configuration in trader.toml:
 ```
 
 Cross-field contradictions are caught too — a `target_dte` outside its own
-`min_dte`/`max_dte` band, a paper run pointed at a live-trading port.
+`min_dte`/`max_dte` band, or a missing `ibkr.account`.
+
+## Which account this trades
+
+`ibkr.account` is required, and it is checked against the session. After
+connecting, the process asks TWS which accounts it manages and refuses to start
+unless the configured one is among them, closing the session first.
+
+**What that proves, exactly:** that the process reached the account you named.
+It does *not* prove that account is a paper account. IBKR exposes no paper/live
+indicator anywhere in the connection handshake, the `DU` prefix everyone relies
+on is a convention IBKR has never documented, and this repository's own verified
+paper account — `DUR318607` — does not match the shape people usually assume.
+**Paper safety is you naming the paper account.**
+
+A paper run pointed at a conventionally live port (7496/4001) now *warns* rather
+than refusing. IBKR documents those as defaults that "can be changed to any open
+socket port", so a live TWS on 7497 would have passed the old check while an SSH
+tunnel or a container port-map would have been blocked by it. The port is a hint
+about intent; the account is evidence about the session.
+
+Deliberate live trading requires both `paper = false` and an account the session
+confirms. Neither alone is enough.
 
 ## Testing
 

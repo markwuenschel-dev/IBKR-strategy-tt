@@ -23,14 +23,14 @@ from ibkr_trader.models import NoTrade, Portfolio
 from ibkr_trader.reviewer import ClaudeReviewer, build_review_payload
 from ibkr_trader.tastytrade import evaluate
 
-from .fakes import SCAN_TIME, tradable_snapshot
+from .fakes import ACCOUNT, SCAN_TIME, tradable_snapshot
 
 PORTFOLIO = Portfolio(net_liquidation=Decimal(50_000), buying_power=Decimal(25_000))
 
 
 def canonical_proposal():
     """The mission-test proposal, produced by the real algorithm."""
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     proposal = evaluate(
         symbol="AAPL",
         snapshot=tradable_snapshot("AAPL"),

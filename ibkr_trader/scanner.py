@@ -404,13 +404,15 @@ class IBKRMarketData:
                 that could produce a real, wrongly-sized order.
         """
         ib = self._client()
-        account = self._ibkr_config.account or ""
+        account = self._ibkr_config.account
 
         try:
             values = list(ib.accountValues(account))
         except Exception as exc:
             logger.exception("Failed to read account values for account %r", account)
             raise MarketDataError(f"Cannot read IBKR account values: {exc}") from exc
+
+        self._require_one_account(values, account, "account value")
 
         net_liquidation = self._account_amount(values, (NET_LIQUIDATION_TAG,))
         if net_liquidation is None:
@@ -430,6 +432,8 @@ class IBKRMarketData:
         except Exception as exc:
             logger.exception("Failed to read positions for account %r", account)
             raise MarketDataError(f"Cannot read IBKR positions: {exc}") from exc
+
+        self._require_one_account(raw_positions, account, "position")
 
         positions: list[Position] = []
         for raw in raw_positions:
@@ -469,6 +473,51 @@ class IBKRMarketData:
     # ------------------------------------------------------------------
     # Underlying
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _require_one_account(rows: Sequence[Any], account: str, kind: str) -> None:
+        """Refuse rows that are not this account's, before any is read as a total.
+
+        Defence in depth. ``accountValues(account)`` and ``positions(account)``
+        filter vendor-side, and ``connect()`` has already refused a session that
+        does not report this account -- so these rows should not arrive. If they
+        do, an assumption is wrong somewhere, and the wrong thing to do with an
+        account total whose provenance is uncertain is to size a trade with it.
+
+        This is the exact defect that made an unnamed account hazardous. With
+        ``account`` blank, ``accountValues("")`` returned the *union* of every
+        account under the login rather than a default one, and the totals were
+        then resolved by independent scans over that flat list -- so net
+        liquidation could come from one book and buying power from another, and
+        the portfolio described neither. Naming the account made that
+        unreachable; this makes it unconstructable.
+
+        Rows carrying no account at all are allowed through: a test double need
+        not model a field the adapter is not otherwise reading, and their
+        absence is not evidence of another book.
+
+        Raises:
+            MarketDataError: any row names an account other than this one.
+        """
+        foreign = sorted(
+            {
+                str(getattr(row, "account", "") or "")
+                for row in rows
+                if str(getattr(row, "account", "") or "") not in ("", account)
+            }
+        )
+        if foreign:
+            logger.error(
+                "IBKR returned %s rows for %s, not the configured account %s",
+                kind,
+                ", ".join(foreign),
+                account,
+            )
+            raise MarketDataError(
+                f"IBKR returned {kind} rows for account(s) "
+                f"{', '.join(foreign)} but this process trades {account}; "
+                f"refusing to size against another book"
+            )
 
     def _pending_positions(self, ib: Any, account: str) -> tuple[list[Position], bool]:
         """Underlyings with an order still working at the broker, and whether we know.

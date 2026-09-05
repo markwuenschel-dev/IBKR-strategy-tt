@@ -16,6 +16,7 @@ Every model is frozen (config cannot mutate mid-run) and forbids unknown keys
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .errors import ConfigError
+
+logger = logging.getLogger(__name__)
 
 #: Hard ceiling on concurrent market-data refresh lines.
 #:
@@ -45,7 +48,16 @@ class IBKRConfig(_Base):
     host: str = "127.0.0.1"
     port: int = Field(default=7497, ge=1, le=65535)
     client_id: int = Field(default=1, ge=0)
-    account: str | None = None
+    #: The IBKR account this process trades. Required, and verified.
+    #:
+    #: Unset, ``ib.accountValues("")`` returns the *union* of every account
+    #: under the login rather than a default one, and the account totals are
+    #: then resolved by independent scans over that flat list -- so net
+    #: liquidation and buying power could come from two different books and
+    #: describe neither. Naming the account is what makes the reads and the
+    #: order address the same place, and it is what
+    #: :meth:`~ibkr_trader.broker.IBKRBroker.connect` checks the session against.
+    account: str = Field(min_length=1)
     paper: bool = True
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
 
@@ -63,19 +75,34 @@ class IBKRConfig(_Base):
     market_data_type: int = Field(default=1, ge=1, le=4)
 
     @model_validator(mode="after")
-    def _paper_port_is_consistent(self) -> IBKRConfig:
-        """Reject a live-trading port while the run claims to be paper-only.
+    def _warn_on_a_live_port_for_a_paper_run(self) -> IBKRConfig:
+        """Warn -- not refuse -- when a paper run names a conventionally live port.
 
-        V4 is paper-first. 7496/4001 are the live TWS/Gateway ports; silently
-        pointing a "paper" run at them is the one configuration mistake that
-        loses real money.
+        This used to raise, and demoting it is deliberate. IBKR documents
+        7496/7497/4001/4002 as *defaults* that "can be changed to any open
+        socket port", and specifically warns about running paper and live TWS on
+        one machine. So a port number is a hint about intent, never evidence
+        about the session: a live TWS configured on 7497 passes this check, and
+        an SSH tunnel or a container port-map makes that an ordinary deployment
+        rather than an exotic one. Refusing on it would block those deployments
+        while still missing the hazard it was written for.
+
+        The enforcement lives where the evidence is: ``connect()`` requires the
+        session to report the account this config names. That check reads the
+        connection that actually opened rather than the number used to open it.
+
+        What this warning knows is that two *configured* values disagree. It
+        says nothing about whether the session is paper or live, because nothing
+        at configuration time can.
         """
         live_ports = {7496, 4001}
         if self.paper and self.port in live_ports:
-            raise ValueError(
-                f"port {self.port} is a live-trading port but paper=true; "
-                f"use 7497 (TWS paper) or 4002 (Gateway paper), "
-                f"or set paper=false deliberately"
+            logger.warning(
+                "port %d is conventionally a live-trading port but paper=true; "
+                "7497 (TWS) and 4002 (Gateway) are the paper defaults. This is a "
+                "hint only -- the account check at connect is what enforces which "
+                "book is traded.",
+                self.port,
             )
         return self
 
@@ -179,7 +206,9 @@ class RunConfig(_Base):
     """Top-level runtime configuration."""
 
     universe: tuple[str, ...] = Field(min_length=1)
-    ibkr: IBKRConfig = IBKRConfig()
+    #: Required, and deliberately without a default: ``ibkr.account`` must be
+    #: named, so the connection settings cannot be conjured from nothing.
+    ibkr: IBKRConfig
     strategy: StrategyConfig = StrategyConfig()
     risk: RiskConfig = RiskConfig()
     reviewer: ReviewerConfig = ReviewerConfig()

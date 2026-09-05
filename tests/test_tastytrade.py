@@ -17,14 +17,14 @@ from ibkr_trader.config import build_config
 from ibkr_trader.models import MarketSnapshot, NoTrade, Portfolio, Right, TradeProposal
 from ibkr_trader.tastytrade import evaluate
 
-from .fakes import GOOD_EXPIRY, SCAN_TIME, quote
+from .fakes import ACCOUNT, GOOD_EXPIRY, SCAN_TIME, quote
 
 NOW = datetime(2026, 1, 15, 14, 31, tzinfo=UTC)
 
 
 @pytest.fixture
 def config():
-    return build_config({"universe": ["AAPL"]})
+    return build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
 
 
 def snapshot_from(*quotes) -> MarketSnapshot:

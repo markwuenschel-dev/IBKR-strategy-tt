@@ -227,6 +227,10 @@ class FakeBroker:
 #   max loss/ct    (5.00 - 1.75) x 100 = 325
 #   sizing         2% of 50,000 = 1,000 budget -> floor(1000/325) = 3 contracts
 
+#: The account every test names. Required since account identity became a
+#: startup gate: an unnamed account is no longer an expressible config.
+ACCOUNT = "DU1234567"
+
 SCAN_TIME = datetime(2026, 1, 15, 14, 30, tzinfo=UTC)
 NEAR_EXPIRY = date(2026, 1, 29)  # 14 DTE - inside no band, must be rejected
 GOOD_EXPIRY = date(2026, 3, 1)  # 45 DTE - the target

@@ -14,11 +14,20 @@ from pydantic import ValidationError
 from ibkr_trader.config import MAX_REFRESH_LIMIT, build_config, load_config
 from ibkr_trader.errors import ConfigError
 
+from .fakes import ACCOUNT
+
 
 def minimal(**overrides) -> dict:
     """Smallest valid settings dict, with targeted overrides."""
-    settings: dict = {"universe": ["AAPL"]}
-    settings.update(overrides)
+    settings: dict = {"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}}
+    for key, value in overrides.items():
+        # Merge the ibkr block rather than replacing it. Every config now needs
+        # an account, so a targeted override of one connection field must not
+        # silently drop it.
+        if key == "ibkr" and isinstance(value, dict):
+            settings["ibkr"] = {**settings["ibkr"], **value}
+        else:
+            settings[key] = value
     return settings
 
 
@@ -85,20 +94,20 @@ def test_unknown_setting_is_rejected_rather_than_ignored():
 def test_empty_universe_is_rejected():
     """A run with nothing to scan is a configuration mistake, not a no-op."""
     with pytest.raises(ConfigError):
-        build_config({"universe": []})
+        build_config({"universe": [], "ibkr": {"account": ACCOUNT}})
 
 
 def test_duplicate_symbol_is_rejected():
     """Duplicates would double-size a position without saying so."""
     with pytest.raises(ConfigError) as exc_info:
-        build_config({"universe": ["AAPL", "AAPL"]})
+        build_config({"universe": ["AAPL", "AAPL"], "ibkr": {"account": ACCOUNT}})
     assert "duplicate" in str(exc_info.value).lower()
 
 
 def test_lowercase_symbol_is_rejected():
     """Symbols are compared by identity elsewhere; casing must be settled here."""
     with pytest.raises(ConfigError) as exc_info:
-        build_config({"universe": ["aapl"]})
+        build_config({"universe": ["aapl"], "ibkr": {"account": ACCOUNT}})
     assert "AAPL" in str(exc_info.value)
 
 
@@ -137,11 +146,18 @@ def test_delta_band_excluding_its_target_is_rejected():
     assert "short_delta_target" in str(exc_info.value)
 
 
-def test_paper_run_pointed_at_a_live_port_is_rejected():
-    """The one configuration mistake that costs real money."""
-    with pytest.raises(ConfigError) as exc_info:
-        build_config(minimal(ibkr={"paper": True, "port": 7496}))
-    assert "live-trading port" in str(exc_info.value)
+def test_paper_run_pointed_at_a_live_port_warns_but_builds():
+    """Demoted from a refusal, deliberately.
+
+    IBKR documents these ports as *defaults* that can be changed to any open
+    socket, so the number is a hint about intent and never evidence about the
+    session. Enforcement moved to the account check at connect, which reads the
+    connection that actually opened. See ``tests/test_account_identity.py``,
+    which owns both ports and the identity gate.
+    """
+    config = build_config(minimal(ibkr={"paper": True, "port": 7496}))
+
+    assert config.ibkr.port == 7496
 
 
 def test_live_port_is_allowed_when_paper_is_explicitly_disabled():
@@ -166,7 +182,8 @@ def test_config_cannot_be_mutated_after_validation():
 def test_load_config_reads_toml(tmp_path):
     path = tmp_path / "trader.toml"
     path.write_text(
-        "universe = ['AAPL', 'MSFT']\n\n[ibkr]\nrefresh_limit = 50\n", encoding="utf-8"
+        f"universe = ['AAPL', 'MSFT']\n\n[ibkr]\naccount = '{ACCOUNT}'\nrefresh_limit = 50\n",
+        encoding="utf-8",
     )
     config = load_config(path)
     assert config.universe == ("AAPL", "MSFT")
@@ -176,7 +193,10 @@ def test_load_config_reads_toml(tmp_path):
 def test_load_config_rejects_bad_value_from_file(tmp_path):
     """The file path enforces identical constraints to the in-memory path."""
     path = tmp_path / "trader.toml"
-    path.write_text("universe = ['AAPL']\n\n[ibkr]\nrefresh_limit = 300\n", encoding="utf-8")
+    path.write_text(
+        f"universe = ['AAPL']\n\n[ibkr]\naccount = '{ACCOUNT}'\nrefresh_limit = 300\n",
+        encoding="utf-8",
+    )
     with pytest.raises(ConfigError) as exc_info:
         load_config(path)
     assert "refresh_limit" in str(exc_info.value)
