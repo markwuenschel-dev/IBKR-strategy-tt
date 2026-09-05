@@ -20,6 +20,8 @@ arithmetic.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 import math
 from datetime import date
@@ -37,6 +39,7 @@ from ibkr_trader.models import (
     leg_payload,
 )
 from ibkr_trader.reviewer import _leg_payload
+from ibkr_trader.scanner import IBKRMarketData
 from ibkr_trader.store import _legs_as_json
 
 # --- fixtures ------------------------------------------------------------
@@ -177,6 +180,41 @@ def test_the_spread_property_is_what_the_payload_reports():
 
     assert leg_payload(leg, derived=True)["spread"] == str(leg.spread)
     assert leg.spread == Decimal("0.10")
+
+
+# --- INT-029: a field whose name was true only half the time -------------
+
+
+def test_the_snapshot_carries_no_unread_volatility_figure():
+    """``implied_volatility`` had zero readers and a name that lied on fallback.
+
+    Nothing in production or in the tests ever read it: not the reviewer
+    payload, not the store schema, not any serializer. It was written at three
+    places and read at none. And when the implied-volatility history was
+    unusable, the fallback filled it with an annualized *realized* volatility of
+    the underlying's closes -- a different quantity under the same name, which
+    the method's own docstring admits and the field name does not.
+
+    ``iv_rank``, which *is* read, is unaffected: it is a percentile within
+    whichever series was used, and it stays honest either way.
+    """
+    fields = {f.name for f in dataclasses.fields(models.MarketSnapshot)}
+
+    assert "implied_volatility" not in fields
+    assert "iv_rank" in fields, "the figure that is actually read must survive"
+
+
+def test_the_raw_volatility_figure_is_still_reported_to_the_operator():
+    """Removing the field must not remove the number from the record.
+
+    The adapter still computes it and still logs it every pass, so an operator
+    reconstructing why a rank looked wrong has the input available -- it just is
+    not carried around the system as data nobody consumes.
+    """
+    source = inspect.getsource(IBKRMarketData.snapshot)
+
+    assert "implied_volatility, iv_rank = self._iv_rank" in source
+    assert "implied_volatility," in source, "still passed to the log line"
 
 
 # --- INT-016: a venue rejection reached the venue ------------------------

@@ -366,7 +366,6 @@ class IBKRMarketData:
             symbol=symbol,
             underlying_price=underlying_price,
             iv_rank=iv_rank,
-            implied_volatility=implied_volatility,
             as_of=as_of,
             chain=chain,
         )

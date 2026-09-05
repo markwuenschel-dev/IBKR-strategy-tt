@@ -33,7 +33,6 @@ def snapshot_from(*quotes) -> MarketSnapshot:
         symbol="AAPL",
         underlying_price=Decimal("195.00"),
         iv_rank=55.0,
-        implied_volatility=0.32,
         as_of=SCAN_TIME,
         chain=tuple(quotes),
     )

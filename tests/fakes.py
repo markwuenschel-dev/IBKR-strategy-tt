@@ -266,7 +266,6 @@ def tradable_snapshot(symbol: str = "AAPL", iv_rank: float = 45.0) -> MarketSnap
         symbol=symbol,
         underlying_price=Decimal("195.00"),
         iv_rank=iv_rank,
-        implied_volatility=0.32,
         as_of=SCAN_TIME,
         chain=tuple(chain),
     )
@@ -286,7 +285,6 @@ def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
         symbol=symbol,
         underlying_price=Decimal("195.00"),
         iv_rank=55.0,
-        implied_volatility=0.40,
         as_of=SCAN_TIME,
         chain=tuple(wide),
     )

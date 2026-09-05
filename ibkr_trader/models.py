@@ -153,7 +153,6 @@ class MarketSnapshot:
     symbol: str
     underlying_price: Decimal
     iv_rank: float
-    implied_volatility: float
     as_of: datetime
     chain: tuple[OptionQuote, ...]
 
