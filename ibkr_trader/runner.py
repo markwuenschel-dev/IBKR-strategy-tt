@@ -41,6 +41,7 @@ from .errors import (
 from .models import (
     SUBMITTED_OUTCOMES,
     ExecutionResult,
+    NeedsDecision,
     NoTrade,
     Outcome,
     SymbolResult,
@@ -119,6 +120,15 @@ class PassSummary:
         return self._count(Outcome.SUBMISSION_FAILED)
 
     @property
+    def awaiting_decision(self) -> int:
+        """Trades the system declined to rule on alone, pending a human answer.
+
+        Counted apart from ``no_trade`` because it is the absence of a decision
+        rather than a decision, and apart from ``errors`` because nothing broke.
+        """
+        return self._count(Outcome.AWAITING_DECISION)
+
+    @property
     def ambiguous(self) -> int:
         return self._count(Outcome.EXECUTION_AMBIGUOUS)
 
@@ -145,6 +155,8 @@ class PassSummary:
             f"Rejected by venue: {self.broker_rejected}",
             f"Never sent: {self.never_sent}",
         ]
+        if self.awaiting_decision:
+            lines.append(f"Awaiting decision: {self.awaiting_decision}")
         if self.ambiguous:
             lines.append(f"Ambiguous (needs reconciliation): {self.ambiguous}")
         if self.errors:
@@ -280,6 +292,18 @@ class Runner:
         )
         if isinstance(decision, NoTrade):
             return SymbolResult(symbol, Outcome.NO_TRADE, decision.reason)
+        if isinstance(decision, NeedsDecision):
+            # Recorded and left for a human, then the pass continues. Not
+            # reviewed and not submitted: a review would spend a request on a
+            # trade that cannot proceed either way, and submitting is the exact
+            # thing the unknown state makes unsafe.
+            log.warning("%s: %s", symbol, decision.reason)
+            return SymbolResult(
+                symbol,
+                Outcome.AWAITING_DECISION,
+                decision.reason,
+                proposal=decision.proposal,
+            )
         proposal = decision
 
         # --- 3. exactly one independent review, because a trade now exists ---

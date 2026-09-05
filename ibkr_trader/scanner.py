@@ -343,7 +343,9 @@ class IBKRMarketData:
         underlying_ticker = self._quote_underlying(ib, underlying)
         underlying_price = self._underlying_price(symbol, underlying_ticker)
 
-        contracts = self._chain_contracts(ib, symbol, underlying, underlying_price, as_of)
+        contracts, trading_class = self._chain_contracts(
+            ib, symbol, underlying, underlying_price, as_of
+        )
         chain = self._quote_chain(ib, symbol, contracts)
         if not chain:
             raise MarketDataError(
@@ -368,6 +370,7 @@ class IBKRMarketData:
             iv_rank=iv_rank,
             as_of=as_of,
             chain=chain,
+            trading_class=trading_class,
         )
 
     def portfolio(self) -> Portfolio:
@@ -444,46 +447,65 @@ class IBKRMarketData:
                 )
             )
 
-        pending = self._pending_positions(ib, account)
+        pending, pending_known = self._pending_positions(ib, account)
         positions.extend(pending)
 
         logger.debug(
-            "Portfolio: net_liquidation=%s buying_power=%s positions=%d (%d pending)",
+            "Portfolio: net_liquidation=%s buying_power=%s positions=%d "
+            "(%d pending, known=%s)",
             net_liquidation,
             buying_power,
             len(positions),
             len(pending),
+            pending_known,
         )
         return Portfolio(
             net_liquidation=net_liquidation,
             buying_power=buying_power,
             positions=tuple(positions),
+            pending_orders_known=pending_known,
         )
 
     # ------------------------------------------------------------------
     # Underlying
     # ------------------------------------------------------------------
 
-    def _pending_positions(self, ib: Any, account: str) -> list[Position]:
-        """Underlyings with an order still working at the broker.
+    def _pending_positions(self, ib: Any, account: str) -> tuple[list[Position], bool]:
+        """Underlyings with an order still working at the broker, and whether we know.
 
         Counted as exposure because an unfilled order is about to become a
-        position. Every live order is included, not only orders this process
-        placed: a manually entered spread on the same underlying is the same
-        concentration risk.
+        position.
 
-        A failure here is logged and treated as "no working orders" rather than
-        raised. Positions and account values -- the numbers a trade is sized
-        against -- have already been read successfully at this point; refusing
-        to scan because the *order* stream hiccuped would be a worse trade-off
-        than proceeding, and the duplicate this could admit is bounded by
-        ``max_positions``.
+        **Scope, stated exactly.** ``openTrades()`` reports the orders of *this
+        client*. Nothing in this package calls ``reqAllOpenOrders`` or the
+        master-client mechanism, and ``ibkr.client_id`` defaults to 1 rather
+        than 0, so an order entered by hand in TWS or placed by another process
+        is not seen here. That is a real gap in the concentration check, stated
+        rather than papered over -- an earlier version of this docstring claimed
+        the opposite.
+
+        **On failure the caller is told, not defaulted.** Reporting "no working
+        orders" for a read that failed is indistinguishable from a genuinely
+        empty book, and both concentration guards key on these rows existing --
+        so they are skipped rather than failed, silently. The previous rationale
+        for defaulting was that any duplicate admitted is bounded by
+        ``max_positions``; that reasoning is circular, because ``max_positions``
+        is enforced against ``open_symbol_count``, which is computed from the
+        very rows the default just discarded.
+
+        So the flag travels instead. The pass is not aborted -- account values
+        and positions were read successfully, and other symbols are unaffected
+        -- but a trade that would have been submitted under a guard that was
+        never evaluated becomes a decision for a human rather than an order.
+
+        Returns:
+            The pending rows, and False when the order stream could not be read.
         """
         try:
             trades = list(ib.openTrades())
         except Exception:
             logger.exception("Failed to read open orders for account %r", account)
-            return []
+            return [], False
 
         pending: list[Position] = []
         for trade in trades:
@@ -505,7 +527,7 @@ class IBKRMarketData:
                     pending=True,
                 )
             )
-        return pending
+        return pending, True
 
     @staticmethod
     def _is_active(trade: Any) -> bool:
@@ -634,7 +656,7 @@ class IBKRMarketData:
         underlying: Any,
         underlying_price: Decimal,
         as_of: datetime,
-    ) -> list[Any]:
+    ) -> tuple[list[Any], str]:
         """Build the narrowed list of option contracts worth quoting.
 
         This is the step that makes the line budget achievable rather than
@@ -643,6 +665,16 @@ class IBKRMarketData:
         strike window around spot, it is tens. Filtering *before* requesting
         quotes is the whole point — a post-filter would still have paid for
         every line.
+
+        The selected chain's trading class is returned alongside the contracts
+        rather than discarded. This is the only place that knows which
+        instrument the quotes describe, and the algorithm needs it: an order
+        carrying no trading class resolves to the *standard* contract, so
+        quoting a non-standard class and submitting from those quotes would
+        trade something other than what was reviewed.
+
+        Returns:
+            The qualified contracts, and the trading class they were built on.
         """
         api = self._require_api()
         try:
@@ -656,7 +688,7 @@ class IBKRMarketData:
             logger.exception("Failed to request option chain parameters for %s", symbol)
             raise MarketDataError(f"{symbol}: cannot read option chain: {exc}") from exc
 
-        chain = self._preferred_chain(chains)
+        chain = self._preferred_chain(chains, symbol)
         if chain is None:
             raise MarketDataError(f"{symbol}: IBKR returned no option chain definition")
 
@@ -695,22 +727,47 @@ class IBKRMarketData:
             len(strikes),
             len(candidates),
         )
-        return self._qualify(ib, symbol, candidates)
+        return self._qualify(ib, symbol, candidates), trading_class
 
     @staticmethod
-    def _preferred_chain(chains: Sequence[Any]) -> Any | None:
+    def _preferred_chain(chains: Sequence[Any], symbol: str) -> Any | None:
         """Choose one chain definition from the several IBKR returns.
 
-        IBKR returns one row per exchange. Prefer SMART — the routing this
-        adapter quotes and trades on — and otherwise take the row listing the
-        most strikes, which is the most complete view of the same options.
+        IBKR returns one row per *(exchange, trading class)* pair — not one per
+        exchange, which is what an earlier version of this docstring said, and
+        the difference is the whole point of the second filter below.
+
+        Three preferences, in order:
+
+        1. **SMART**, the routing this adapter quotes and trades on. Unchanged,
+           and deliberately so: ``ib_async`` preserves ``SMART`` when qualifying
+           a contract precisely because substituting a concrete exchange can
+           produce an invalid one.
+        2. **The trading class matching the underlying.** Selection used to be
+           on strike count alone, so a row describing a *non-standard* class —
+           ``AAPL1``, an adjusted contract left behind by a split or a special
+           dividend — won whenever it happened to list more strikes. Options on
+           an adjusted class are a different instrument with a different
+           deliverable, so a longer list of them is not "a more complete view of
+           the same options"; it is a view of other options.
+        3. **The most strikes**, among rows that are otherwise equivalent. This
+           was the whole rule before and remains right where it was never wrong:
+           two rows for the same class really are two views of the same options.
+
+        A non-standard row is still returned when it is the only one. Whether a
+        trade on it is acceptable is a decision for the caller, which is why the
+        selected class travels on the snapshot rather than being discarded here.
         """
         usable = [c for c in chains if getattr(c, "expirations", None)]
         if not usable:
             return None
         smart = [c for c in usable if getattr(c, "exchange", "") == EXCHANGE]
         pool = smart or usable
-        return max(pool, key=lambda c: len(getattr(c, "strikes", ()) or ()))
+        # An absent tradingClass is not a match. `_chain_contracts` falls back to
+        # the symbol when building a contract, which is right there and would be
+        # wrong here: it would make an unlabelled row look confirmed-standard.
+        matching = [c for c in pool if getattr(c, "tradingClass", "") == symbol]
+        return max(matching or pool, key=lambda c: len(getattr(c, "strikes", ()) or ()))
 
     def _expiries_in_band(self, chain: Any, today: date) -> list[date]:
         """Expiries inside ``[min_dte, max_dte]``, ascending.

@@ -148,7 +148,9 @@ def test_the_candidate_chain_is_built_through_the_injected_api():
     ib = FakeIB(chains=[chain_definition([180, 190, 195, 200], expiries)])
     underlying = SimpleNamespace(symbol="AAPL", conId=1234)
 
-    candidates = adapter(ib)._chain_contracts(ib, "AAPL", underlying, Decimal("195.00"), as_of)
+    candidates, trading_class = adapter(ib)._chain_contracts(
+        ib, "AAPL", underlying, Decimal("195.00"), as_of
+    )
 
     assert ib.chain_requests == [("AAPL", "", "STK", 1234)]
     assert candidates, "the narrowed chain collapsed to nothing"
@@ -157,6 +159,7 @@ def test_the_candidate_chain_is_built_through_the_injected_api():
     assert {c.exchange for c in candidates} == {EXCHANGE}
     assert {c.currency for c in candidates} == {CURRENCY}
     assert {c.tradingClass for c in candidates} == {"AAPL"}
+    assert trading_class == "AAPL", "the selected class must reach the caller"
     assert {c.expiry for c in candidates} == {d.strftime("%Y%m%d") for d in expiries}
     # Two expiries x the strikes inside the window around 195.
     assert len(candidates) == 2 * len({c.strike for c in candidates})

@@ -105,17 +105,34 @@ def test_pending_and_filled_exposure_are_both_counted():
     assert portfolio.has_position("SPY") is True
 
 
+class BrokenOrders(AccountStubIB):
+    def openTrades(self):
+        raise RuntimeError("order stream unavailable")
+
+
 def test_order_stream_failure_does_not_abort_the_scan():
     """Sizing data already read successfully; a broken order stream is degraded,
     not fatal."""
-
-    class BrokenOrders(AccountStubIB):
-        def openTrades(self):
-            raise RuntimeError("order stream unavailable")
-
     portfolio = market_data(BrokenOrders()).portfolio()
     assert portfolio.net_liquidation == Decimal(50_000)
     assert portfolio.positions == ()
+
+
+def test_order_stream_failure_is_reported_rather_than_defaulted():
+    """Degraded is not the same as empty, and the caller has to be able to tell.
+
+    This is the assertion that was missing: `positions == ()` above is equally
+    true of a healthy account with no working orders, so on its own it cannot
+    distinguish "nothing outstanding" from "I could not find out". Both
+    concentration guards key on these rows existing, so the difference decides
+    whether the algorithm may rule on a trade by itself.
+    """
+    healthy = market_data(AccountStubIB()).portfolio()
+    degraded = market_data(BrokenOrders()).portfolio()
+
+    assert healthy.positions == degraded.positions == ()
+    assert healthy.pending_orders_known is True
+    assert degraded.pending_orders_known is False
 
 
 # --- layer 2: the loop does not stack duplicate orders ---------------------

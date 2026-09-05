@@ -29,6 +29,7 @@ from .models import (
     CONTRACT_MULTIPLIER,
     Action,
     MarketSnapshot,
+    NeedsDecision,
     NoTrade,
     OptionQuote,
     Portfolio,
@@ -170,7 +171,7 @@ def evaluate(
     strategy: StrategyConfig,
     risk: RiskConfig,
     now: datetime,
-) -> TradeProposal | NoTrade:
+) -> TradeProposal | NoTrade | NeedsDecision:
     """Decide whether to trade one symbol.
 
     Args:
@@ -182,8 +183,13 @@ def evaluate(
         now: Proposal timestamp, injected so this function stays pure.
 
     Returns:
-        A :class:`TradeProposal` to place, or :class:`NoTrade` with the
-        operator-facing reason it was declined.
+        A :class:`TradeProposal` to place; :class:`NoTrade` with the
+        operator-facing reason it was declined; or :class:`NeedsDecision` when a
+        trade exists but cannot be ruled on here. The third is not a refusal --
+        it is the absence of a decision, and it carries the proposal so a human
+        has the trade in front of them. It is returned only after a proposal has
+        been built, so a symbol that would have been declined anyway never
+        spends one.
     """
     # --- volatility: only sell premium when it is historically rich ---
     if snapshot.iv_rank < strategy.min_iv_rank:
@@ -341,7 +347,7 @@ def evaluate(
         ),
     }
 
-    return TradeProposal(
+    proposal = TradeProposal(
         symbol=symbol,
         strategy=STRATEGY_NAME,
         expiry=expiry,
@@ -359,3 +365,41 @@ def evaluate(
         criteria=criteria,
         created_at=now,
     )
+
+    if snapshot.trading_class and snapshot.trading_class != symbol:
+        # The quote and the order must name the same instrument, and today they
+        # cannot be shown to: `broker._build_option` sends no tradingClass at
+        # all, so the venue would resolve the *standard* contract at this strike
+        # and expiry while the quote, the screen and the review all referred to
+        # the non-standard one. The failure mode is not a rejected order -- it
+        # is a filled one, on a different deliverable, that nothing in the
+        # record distinguishes from the intended trade. Refused here until the
+        # broker carries the class; see the tracked broker-side defect.
+        return NeedsDecision(
+            symbol=symbol,
+            reason=(
+                f"{symbol} quoted on the non-standard trading class "
+                f"{snapshot.trading_class!r}; the broker submits no trading "
+                f"class, so the order would name a different instrument than "
+                f"the one quoted and reviewed"
+            ),
+            proposal=proposal,
+        )
+
+    if not portfolio.pending_orders_known:
+        # Every guard above that could have refused this trade reads rows the
+        # adapter synthesizes from still-working orders, and those rows are
+        # missing. The guards did not pass -- they were not evaluated. Asking
+        # is the only honest answer available, and it is asked here rather than
+        # before the chain work so a symbol that would have been declined
+        # anyway does not spend a human decision.
+        return NeedsDecision(
+            symbol=symbol,
+            reason=(
+                "working-order state is unknown, so neither the duplicate-symbol "
+                "guard nor the position limit could be evaluated for this trade"
+            ),
+            proposal=proposal,
+        )
+
+    return proposal

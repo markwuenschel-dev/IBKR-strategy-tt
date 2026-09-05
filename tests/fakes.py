@@ -75,6 +75,7 @@ class StubMarketData:
         failures: dict[str, Exception] | None = None,
         portfolio: Portfolio | None = None,
         working_orders: dict[str, int] | None = None,
+        pending_orders_known: bool = True,
     ) -> None:
         self._snapshots = snapshots or {}
         self._failures = failures or {}
@@ -82,6 +83,7 @@ class StubMarketData:
             net_liquidation=Decimal(50_000), buying_power=Decimal(25_000)
         )
         self._working_orders = dict(working_orders or {})
+        self._pending_orders_known = pending_orders_known
         self.requested: list[str] = []
 
     def snapshot(self, symbol: str) -> MarketSnapshot:
@@ -93,9 +95,16 @@ class StubMarketData:
         return self._snapshots[symbol]
 
     def portfolio(self) -> Portfolio:
-        """Filled holdings plus any still-working orders, as the port requires."""
+        """Filled holdings plus any still-working orders, as the port requires.
+
+        ``pending_orders_known=False`` models the adapter failing to read the
+        order stream: the working-order rows are absent *and* the portfolio says
+        so, which is what lets the algorithm tell "no working orders" apart from
+        "I could not find out".
+        """
+        base = replace(self._portfolio, pending_orders_known=self._pending_orders_known)
         if not self._working_orders:
-            return self._portfolio
+            return base
         pending = tuple(
             Position(
                 symbol=symbol,
@@ -105,7 +114,7 @@ class StubMarketData:
             )
             for symbol, quantity in self._working_orders.items()
         )
-        return replace(self._portfolio, positions=self._portfolio.positions + pending)
+        return replace(base, positions=base.positions + pending)
 
 
 class StubReviewer:
