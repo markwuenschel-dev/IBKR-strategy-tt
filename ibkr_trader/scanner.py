@@ -660,18 +660,21 @@ class IBKRMarketData:
         """Build the narrowed list of option contracts worth quoting.
 
         This is the step that makes the line budget achievable rather than
-        The selected chain's trading class is returned alongside the contracts
-        rather than discarded. It is the only place that knows which instrument
-        the quotes describe, and the algorithm needs it: an order carrying no
-        trading class resolves to the *standard* contract, so quoting a
-        non-standard class and submitting from those quotes would trade
-        something other than what was reviewed.
-
         merely enforced. The full chain for a liquid ETF is thousands of
         contracts; after filtering to the configured DTE band, to puts, and to a
         strike window around spot, it is tens. Filtering *before* requesting
         quotes is the whole point — a post-filter would still have paid for
         every line.
+
+        The selected chain's trading class is returned alongside the contracts
+        rather than discarded. This is the only place that knows which
+        instrument the quotes describe, and the algorithm needs it: an order
+        carrying no trading class resolves to the *standard* contract, so
+        quoting a non-standard class and submitting from those quotes would
+        trade something other than what was reviewed.
+
+        Returns:
+            The qualified contracts, and the trading class they were built on.
         """
         api = self._require_api()
         try:

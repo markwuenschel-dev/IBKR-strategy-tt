@@ -184,6 +184,15 @@ def test_an_escalated_symbol_is_recorded_and_never_submitted(tmp_path):
     assert reviewer.call_count == 0, "no point spending a review on a blocked trade"
     assert summary.awaiting_decision == 1
 
+    # The proposal is the whole point of the record: it is what a human reads to
+    # rule. An escalation that persists only a reason is a notification, not a
+    # decision request.
+    (result,) = summary.results
+    assert result.proposal is not None, "the escalated trade was not carried"
+    assert result.proposal.symbol == "AAPL"
+    stored = store_proposals(tmp_path)
+    assert [row["symbol"] for row in stored] == ["AAPL"]
+
 
 def test_one_ambiguous_symbol_does_not_stop_the_symbols_after_it(tmp_path):
     """The explicit ruling: no unresolved escalation becomes a day-wide stop.
@@ -381,3 +390,14 @@ def test_a_non_standard_class_still_does_not_stop_the_pass(tmp_path):
     )
     assert summary.awaiting_decision == 1
     assert broker.call_count == 1, "exactly the eligible trade reached the venue"
+
+
+def store_proposals(tmp_path):
+    """Re-open the run's database and read back what was persisted."""
+    from ibkr_trader.store import SqliteStore
+
+    reopened = SqliteStore(tmp_path / "trader.sqlite3")
+    try:
+        return reopened.proposals()
+    finally:
+        reopened.close()

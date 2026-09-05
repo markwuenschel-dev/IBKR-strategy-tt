@@ -183,8 +183,13 @@ def evaluate(
         now: Proposal timestamp, injected so this function stays pure.
 
     Returns:
-        A :class:`TradeProposal` to place, or :class:`NoTrade` with the
-        operator-facing reason it was declined.
+        A :class:`TradeProposal` to place; :class:`NoTrade` with the
+        operator-facing reason it was declined; or :class:`NeedsDecision` when a
+        trade exists but cannot be ruled on here. The third is not a refusal --
+        it is the absence of a decision, and it carries the proposal so a human
+        has the trade in front of them. It is returned only after a proposal has
+        been built, so a symbol that would have been declined anyway never
+        spends one.
     """
     # --- volatility: only sell premium when it is historically rich ---
     if snapshot.iv_rank < strategy.min_iv_rank:
