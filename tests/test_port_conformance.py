@@ -148,8 +148,26 @@ def doubles() -> list[tuple[type, Any]]:
     ]
 
 
-def ids(pairs):
-    return [f"{p.__name__}:{type(impl).__name__}" for p, impl in pairs]
+def all_protocols() -> list[type]:
+    """Every Protocol declared in ``ports``, discovered rather than listed.
+
+    Enumerated instead of hard-coded so a fifth port added later is covered by
+    every check below without anyone remembering to extend a tuple. A gate that
+    silently stops covering new work is the failure mode this whole module
+    exists to prevent, and it would be an odd one to reintroduce here.
+    """
+    found = [
+        value
+        for name, value in vars(ports).items()
+        if not name.startswith("_")
+        and isinstance(value, type)
+        and getattr(value, "_is_protocol", False)
+        # `typing.Protocol` is itself imported into the module namespace and is
+        # itself a protocol; only the ones declared here are ports.
+        and value.__module__ == ports.__name__
+    ]
+    assert found, "no Protocol found in ports -- the discovery itself is broken"
+    return found
 
 
 # --- ARCH-C1, check 1: structural ---------------------------------------
@@ -157,10 +175,24 @@ def ids(pairs):
 
 def test_every_protocol_is_runtime_checkable():
     """Without this, ``isinstance`` against a port raises instead of answering."""
-    for protocol in (ports.MarketData, ports.Reviewer, ports.Broker, ports.Store):
+    for protocol in all_protocols():
         assert isinstance(object(), protocol) is False, (
             f"{protocol.__name__} is not runtime_checkable"
         )
+
+
+def test_every_port_has_a_production_implementation_under_test(tmp_path):
+    """The coverage claim the checks below rest on.
+
+    Each check iterates a list of (port, implementation) pairs. If a port were
+    missing from those lists, every one of them would pass while saying nothing
+    about it -- green, and hollow.
+    """
+    covered = {protocol for protocol, _ in production_adapters(tmp_path)}
+
+    assert covered == set(all_protocols()), (
+        f"ports not exercised: {sorted(p.__name__ for p in set(all_protocols()) - covered)}"
+    )
 
 
 def test_production_adapters_satisfy_their_port_structurally(tmp_path):
@@ -349,17 +381,13 @@ def test_the_ports_module_type_hints_resolve():
     unnoticed. Resolving the hints is the cheapest check that every name in the
     contract still exists.
     """
-    for protocol in (ports.MarketData, ports.Reviewer, ports.Broker, ports.Store):
+    for protocol in all_protocols():
         for name in protocol_members(protocol):
             hints = get_type_hints(member(protocol, name))
             assert "return" in hints, f"{protocol.__name__}.{name} has no return annotation"
 
 
-@pytest.mark.parametrize(
-    "protocol",
-    [ports.MarketData, ports.Reviewer, ports.Broker, ports.Store],
-    ids=lambda p: p.__name__,
-)
+@pytest.mark.parametrize("protocol", all_protocols(), ids=lambda p: p.__name__)
 def test_each_port_declares_at_least_one_member(protocol):
     """Guards the harness itself: an empty Protocol would pass every check above."""
     assert protocol_members(protocol), f"{protocol.__name__} declares nothing"

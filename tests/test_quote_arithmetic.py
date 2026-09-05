@@ -20,10 +20,12 @@ arithmetic.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import inspect
 import json
 import math
+import textwrap
 from datetime import date
 from decimal import Decimal
 
@@ -117,9 +119,16 @@ def test_the_selection_figure_stays_infinite_on_a_dead_book():
 # --- ARCH-C7: one wire shape ---------------------------------------------
 
 
-def test_both_serializers_render_the_leg_through_the_same_owner():
-    """Neither serializer may hand-maintain the shape any more."""
-    leg = proposal_leg("3.35", "3.45")
+@pytest.mark.parametrize(("bid", "ask"), BOOKS)
+def test_both_serializers_render_the_leg_through_the_same_owner(bid, ask):
+    """Neither serializer may hand-maintain the shape any more.
+
+    Parametrized over every book, the dead one included. A single healthy book
+    would not notice a ``_leg_payload`` that diverged only when mid is
+    non-positive -- and that is the exact case this change exists to eliminate,
+    since it is where the two old implementations disagreed.
+    """
+    leg = proposal_leg(bid, ask)
 
     assert _leg_payload(leg) == leg_payload(leg, derived=True)
 
@@ -170,16 +179,32 @@ def test_a_normal_book_carries_a_real_ratio():
 # --- INT-036: the property gains a reader --------------------------------
 
 
-def test_the_spread_property_is_what_the_payload_reports():
+def test_the_payload_reads_the_spread_property_rather_than_recomputing_it(monkeypatch):
     """`OptionQuote.spread` had exactly one reader: its own sibling property.
 
-    Now the serializer reads it too, through the shared arithmetic, so the
-    property is load-bearing rather than decorative.
+    Asserting ``payload["spread"] == str(leg.spread)`` is not enough to show
+    that. A serializer writing ``str(leg.ask - leg.bid)`` inline satisfies that
+    equality while reading nothing -- the property would still be dead, and this
+    test would still be green.
+
+    So the property itself is replaced. A payload that reports the substitute is
+    reading it; a payload that reports 0.10 is recomputing behind its back.
     """
     leg = proposal_leg("3.35", "3.45")
-
-    assert leg_payload(leg, derived=True)["spread"] == str(leg.spread)
     assert leg.spread == Decimal("0.10")
+
+    monkeypatch.setattr(models.Quoted, "spread", property(lambda _self: Decimal("999")))
+
+    assert leg.spread == Decimal("999"), "the substitution itself must take effect"
+    assert leg_payload(leg, derived=True)["spread"] == "999"
+
+
+def test_the_payload_reads_the_mid_property_too():
+    """The same claim for the other derived figure the reviewer is shown."""
+    leg = proposal_leg("3.35", "3.45")
+
+    assert leg_payload(leg, derived=True)["mid"] == str(leg.mid)
+    assert leg.mid == Decimal("3.40")
 
 
 # --- INT-029: a field whose name was true only half the time -------------
@@ -210,11 +235,54 @@ def test_the_raw_volatility_figure_is_still_reported_to_the_operator():
     The adapter still computes it and still logs it every pass, so an operator
     reconstructing why a rank looked wrong has the input available -- it just is
     not carried around the system as data nobody consumes.
-    """
-    source = inspect.getsource(IBKRMarketData.snapshot)
 
-    assert "implied_volatility, iv_rank = self._iv_rank" in source
-    assert "implied_volatility," in source, "still passed to the log line"
+    Checked against the parsed call, not against substrings of the source. Two
+    substring assertions here were tautological: `"implied_volatility,"` is
+    contained in `"implied_volatility, iv_rank = self._iv_rank"`, so the second
+    could not fail while the first passed, and neither noticed the argument
+    being replaced with a constant or `iv=` leaving the format string.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(IBKRMarketData.snapshot)))
+
+    logged = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"info", "warning"}
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and "iv=" in call.args[0].value
+    ]
+
+    assert logged, "no log line in snapshot() reports a volatility figure"
+    names = {arg.id for call in logged for arg in call.args if isinstance(arg, ast.Name)}
+    assert "implied_volatility" in names, (
+        "the volatility figure is no longer passed to the operator log line"
+    )
+
+
+def test_the_volatility_figure_is_still_computed_where_the_log_line_can_see_it():
+    """The name the log line reports must be bound from the real computation.
+
+    Separated from the assertion above because they fail for different reasons:
+    this one goes red if the call disappears, that one if the argument does.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(IBKRMarketData.snapshot)))
+
+    bound = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_iv_rank"
+        for element in node.targets
+        for target in (element.elts if isinstance(element, ast.Tuple) else [element])
+        if isinstance(target, ast.Name)
+    }
+
+    assert {"implied_volatility", "iv_rank"} <= bound
 
 
 # --- INT-016: a venue rejection reached the venue ------------------------
