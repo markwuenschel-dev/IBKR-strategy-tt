@@ -304,6 +304,21 @@ def test_the_port_states_the_working_orders_obligation():
     assert "pending" in doc, "the port does not mention working orders at all"
 
 
+def test_the_port_states_what_to_do_when_the_obligation_cannot_be_met():
+    """An implementation that cannot see working orders must say so.
+
+    Reporting no rows and reporting "I could not find out" are the same value
+    otherwise, and the guards key on a row existing — so the second one skips
+    them silently. This is the half of the obligation that makes the first half
+    safe to rely on.
+    """
+    doc = " ".join((inspect.getdoc(member(ports.MarketData, "portfolio")) or "").split())
+
+    assert "pending_orders_known=False" in doc, (
+        "the port states the obligation but not how to signal failing it"
+    )
+
+
 def test_the_default_double_carries_the_working_orders_obligation():
     """A conforming fake must be able to satisfy the obligation, not just the shape.
 

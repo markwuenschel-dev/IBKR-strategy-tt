@@ -61,8 +61,20 @@ class MarketData(Protocol):
         This is an obligation on every implementation, not a description of one
         adapter's behaviour. It is the reason the guard can be trusted at all.
 
+        An implementation that *cannot* determine the working orders — the order
+        stream failed, the venue answered partially — must say so by returning
+        ``Portfolio(pending_orders_known=False)`` rather than omitting the rows
+        silently. The two are indistinguishable to a caller otherwise, and the
+        guards key on a row *existing*, so an omission skips them instead of
+        failing them. Under that flag the algorithm stops short of submitting
+        and raises the trade for a human decision; it does not halt the pass,
+        and other symbols are unaffected.
+
         Raises:
-            MarketDataError: account state is unavailable or unusable.
+            MarketDataError: account state is unavailable or unusable. Note this
+                is for the sizing numbers, not for the working orders: an
+                unreadable order stream is reported through the flag above,
+                because it does not make the rest of the account state unusable.
         """
         ...
 

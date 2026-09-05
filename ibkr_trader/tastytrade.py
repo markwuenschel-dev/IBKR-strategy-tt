@@ -29,6 +29,7 @@ from .models import (
     CONTRACT_MULTIPLIER,
     Action,
     MarketSnapshot,
+    NeedsDecision,
     NoTrade,
     OptionQuote,
     Portfolio,
@@ -170,7 +171,7 @@ def evaluate(
     strategy: StrategyConfig,
     risk: RiskConfig,
     now: datetime,
-) -> TradeProposal | NoTrade:
+) -> TradeProposal | NoTrade | NeedsDecision:
     """Decide whether to trade one symbol.
 
     Args:
@@ -341,7 +342,7 @@ def evaluate(
         ),
     }
 
-    return TradeProposal(
+    proposal = TradeProposal(
         symbol=symbol,
         strategy=STRATEGY_NAME,
         expiry=expiry,
@@ -359,3 +360,21 @@ def evaluate(
         criteria=criteria,
         created_at=now,
     )
+
+    if not portfolio.pending_orders_known:
+        # Every guard above that could have refused this trade reads rows the
+        # adapter synthesizes from still-working orders, and those rows are
+        # missing. The guards did not pass -- they were not evaluated. Asking
+        # is the only honest answer available, and it is asked here rather than
+        # before the chain work so a symbol that would have been declined
+        # anyway does not spend a human decision.
+        return NeedsDecision(
+            symbol=symbol,
+            reason=(
+                "working-order state is unknown, so neither the duplicate-symbol "
+                "guard nor the position limit could be evaluated for this trade"
+            ),
+            proposal=proposal,
+        )
+
+    return proposal

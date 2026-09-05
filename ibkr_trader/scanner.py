@@ -444,46 +444,65 @@ class IBKRMarketData:
                 )
             )
 
-        pending = self._pending_positions(ib, account)
+        pending, pending_known = self._pending_positions(ib, account)
         positions.extend(pending)
 
         logger.debug(
-            "Portfolio: net_liquidation=%s buying_power=%s positions=%d (%d pending)",
+            "Portfolio: net_liquidation=%s buying_power=%s positions=%d "
+            "(%d pending, known=%s)",
             net_liquidation,
             buying_power,
             len(positions),
             len(pending),
+            pending_known,
         )
         return Portfolio(
             net_liquidation=net_liquidation,
             buying_power=buying_power,
             positions=tuple(positions),
+            pending_orders_known=pending_known,
         )
 
     # ------------------------------------------------------------------
     # Underlying
     # ------------------------------------------------------------------
 
-    def _pending_positions(self, ib: Any, account: str) -> list[Position]:
-        """Underlyings with an order still working at the broker.
+    def _pending_positions(self, ib: Any, account: str) -> tuple[list[Position], bool]:
+        """Underlyings with an order still working at the broker, and whether we know.
 
         Counted as exposure because an unfilled order is about to become a
-        position. Every live order is included, not only orders this process
-        placed: a manually entered spread on the same underlying is the same
-        concentration risk.
+        position.
 
-        A failure here is logged and treated as "no working orders" rather than
-        raised. Positions and account values -- the numbers a trade is sized
-        against -- have already been read successfully at this point; refusing
-        to scan because the *order* stream hiccuped would be a worse trade-off
-        than proceeding, and the duplicate this could admit is bounded by
-        ``max_positions``.
+        **Scope, stated exactly.** ``openTrades()`` reports the orders of *this
+        client*. Nothing in this package calls ``reqAllOpenOrders`` or the
+        master-client mechanism, and ``ibkr.client_id`` defaults to 1 rather
+        than 0, so an order entered by hand in TWS or placed by another process
+        is not seen here. That is a real gap in the concentration check, stated
+        rather than papered over -- an earlier version of this docstring claimed
+        the opposite.
+
+        **On failure the caller is told, not defaulted.** Reporting "no working
+        orders" for a read that failed is indistinguishable from a genuinely
+        empty book, and both concentration guards key on these rows existing --
+        so they are skipped rather than failed, silently. The previous rationale
+        for defaulting was that any duplicate admitted is bounded by
+        ``max_positions``; that reasoning is circular, because ``max_positions``
+        is enforced against ``open_symbol_count``, which is computed from the
+        very rows the default just discarded.
+
+        So the flag travels instead. The pass is not aborted -- account values
+        and positions were read successfully, and other symbols are unaffected
+        -- but a trade that would have been submitted under a guard that was
+        never evaluated becomes a decision for a human rather than an order.
+
+        Returns:
+            The pending rows, and False when the order stream could not be read.
         """
         try:
             trades = list(ib.openTrades())
         except Exception:
             logger.exception("Failed to read open orders for account %r", account)
-            return []
+            return [], False
 
         pending: list[Position] = []
         for trade in trades:
@@ -505,7 +524,7 @@ class IBKRMarketData:
                     pending=True,
                 )
             )
-        return pending
+        return pending, True
 
     @staticmethod
     def _is_active(trade: Any) -> bool:

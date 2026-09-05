@@ -52,6 +52,7 @@ class Outcome(str, Enum):
     REVIEW_ERROR = "REVIEW_ERROR"
     SUBMISSION_FAILED = "SUBMISSION_FAILED"
     BROKER_REJECTED = "BROKER_REJECTED"
+    AWAITING_DECISION = "AWAITING_DECISION"
     EXECUTION_AMBIGUOUS = "EXECUTION_AMBIGUOUS"
     ACCEPTED = "ACCEPTED"
     WORKING = "WORKING"
@@ -195,6 +196,16 @@ class Portfolio:
     buying_power: Decimal
     positions: tuple[Position, ...] = ()
 
+    #: False when the venue's working-order stream could not be read.
+    #:
+    #: Both concentration guards key on rows synthesized from still-working
+    #: orders. If that read fails and the failure is not carried here, the
+    #: resulting portfolio is indistinguishable from one that genuinely has no
+    #: working orders -- and the guards are then *skipped* rather than failed,
+    #: silently. This flag is the whole difference between a decision the
+    #: algorithm may make alone and one it may not.
+    pending_orders_known: bool = True
+
     def positions_for(self, symbol: str) -> tuple[Position, ...]:
         """Existing positions in one underlying."""
         return tuple(p for p in self.positions if p.symbol == symbol)
@@ -285,6 +296,28 @@ class NoTrade:
     """The algorithm declined this symbol, with the operator-facing reason."""
 
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class NeedsDecision:
+    """The algorithm cannot rule on this symbol safely and is asking a human.
+
+    Distinct from :class:`NoTrade` in the only way that matters: a ``NoTrade``
+    is a decision, and this is the absence of one. Declining to trade because a
+    guard refused is a fact about the market; declining because a guard could
+    not be evaluated is a fact about the system, and the two need different
+    responses from whoever is reading.
+
+    ``proposal`` is the trade that would have been submitted, carried as
+    *context for the ruling* rather than as a commitment to submit it. A quote
+    decays in minutes, so an approval that arrives later authorises proceeding
+    on a fresh evaluation of this symbol -- never replaying this exact order at
+    this exact price.
+    """
+
+    symbol: str
+    reason: str
+    proposal: TradeProposal | None = None
 
 
 @dataclass(frozen=True, slots=True)
