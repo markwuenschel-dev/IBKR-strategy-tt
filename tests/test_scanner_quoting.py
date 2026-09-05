@@ -275,6 +275,9 @@ def test_a_whole_snapshot_can_be_taken_without_the_vendor_installed():
     assert {q.right for q in snapshot.chain} == {Right.PUT}
     assert set(snapshot.expiries()) == set(expiries)
     assert 0.0 <= snapshot.iv_rank <= 100.0
+    assert snapshot.trading_class == "AAPL", (
+        "the class the quotes describe must reach the caller"
+    )
 
     # The budget holds across a real pass, not only in the unit above.
     assert ib.peak <= 4, f"{ib.peak} lines open at once against a budget of 4"
@@ -311,3 +314,23 @@ def test_a_chain_listing_only_strikes_above_spot_fails_loudly():
         adapter(ib, refresh_limit=4).snapshot("AAPL")
 
     assert ib.open == set(), "a failed pass must not leak lines either"
+
+
+def test_a_non_standard_trading_class_reaches_the_snapshot_intact():
+    """The adapter is the only thing that knows which instrument was quoted.
+
+    If it reports "" here, the algorithm's instrument-identity guard silently
+    stops guarding: an empty class means "not reported", so every non-standard
+    chain would look ordinary. Asserted through a real snapshot() rather than a
+    double, because a double asserting its own input proves nothing about the
+    adapter.
+    """
+    expiries = [SCAN_TIME.date() + timedelta(days=30)]
+    ib = SnapshotIB(
+        chains=[chain_row([180, 185, 190, 195], expiries, trading_class="AAPL1")],
+        bars=historical_bars(),
+    )
+
+    snapshot = adapter(ib, refresh_limit=4).snapshot("AAPL")
+
+    assert snapshot.trading_class == "AAPL1"

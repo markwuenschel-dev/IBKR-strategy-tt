@@ -291,3 +291,93 @@ def test_the_repository_still_does_not_request_other_clients_orders(call):
     ]
 
     assert hits == [], f"{call} is now called in {hits}; the docstring needs updating"
+
+
+# --- INT-023 fallout: instrument identity ------------------------------
+
+
+def snapshot_on_class(symbol, trading_class):
+    from dataclasses import replace
+
+    return replace(tradable_snapshot(symbol), trading_class=trading_class)
+
+
+def test_a_proposal_on_a_non_standard_trading_class_is_escalated_not_submitted():
+    """The broker would trade a different instrument than the one reviewed.
+
+    `broker._build_option` omits tradingClass entirely, so a proposal quoted and
+    reviewed against an adjusted class -- AAPL1, left behind by a split or a
+    special dividend -- would be resolved by the broker as standard AAPL at the
+    same strike and expiry. Not a rejected order: a *filled* one, on a different
+    deliverable, that nothing in the record would distinguish from the intended
+    trade.
+
+    Until that is fixed at the broker, the algorithm refuses to hand it over.
+    """
+    strategy, risk = config_pair()
+    healthy = Portfolio(net_liquidation=Decimal(50_000), buying_power=Decimal(25_000))
+
+    decision = evaluate(
+        "AAPL", snapshot_on_class("AAPL", "AAPL1"), healthy, strategy, risk, SCAN_TIME
+    )
+
+    assert isinstance(decision, NeedsDecision)
+    assert "AAPL1" in decision.reason
+    assert "trading class" in decision.reason
+    assert decision.proposal is not None
+
+
+def test_the_standard_trading_class_proposes_normally():
+    """The ordinary path must not be disturbed by the guard."""
+    strategy, risk = config_pair()
+    healthy = Portfolio(net_liquidation=Decimal(50_000), buying_power=Decimal(25_000))
+
+    decision = evaluate(
+        "AAPL", snapshot_on_class("AAPL", "AAPL"), healthy, strategy, risk, SCAN_TIME
+    )
+
+    assert isinstance(decision, TradeProposal)
+
+
+def test_an_unknown_trading_class_proposes_normally():
+    """An empty class is 'not reported', not 'reported as wrong'.
+
+    Snapshots built by doubles that predate this field must keep working, and a
+    missing value is not evidence of a non-standard instrument.
+    """
+    strategy, risk = config_pair()
+    healthy = Portfolio(net_liquidation=Decimal(50_000), buying_power=Decimal(25_000))
+
+    decision = evaluate(
+        "AAPL", snapshot_on_class("AAPL", ""), healthy, strategy, risk, SCAN_TIME
+    )
+
+    assert isinstance(decision, TradeProposal)
+
+
+def test_a_non_standard_class_still_does_not_stop_the_pass(tmp_path):
+    """Other eligible trades keep processing, per the same ruling."""
+    market = StubMarketData(
+        {
+            "AAPL": snapshot_on_class("AAPL", "AAPL1"),
+            "MSFT": snapshot_on_class("MSFT", "MSFT"),
+        }
+    )
+    runner, _, _, broker, store = build_runner(
+        tmp_path, universe=("AAPL", "MSFT"), market=market
+    )
+
+    summary = runner.run_once()
+
+    rows = store._conn.execute(
+        "SELECT symbol, outcome FROM symbol_attempts ORDER BY id"
+    ).fetchall()
+    store.close()
+
+    outcomes = {r["symbol"]: r["outcome"] for r in rows}
+    assert outcomes["AAPL"] == Outcome.AWAITING_DECISION.value
+    assert outcomes["MSFT"] != Outcome.AWAITING_DECISION.value, (
+        "the eligible symbol must still be processed"
+    )
+    assert summary.awaiting_decision == 1
+    assert broker.call_count == 1, "exactly the eligible trade reached the venue"

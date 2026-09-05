@@ -343,7 +343,9 @@ class IBKRMarketData:
         underlying_ticker = self._quote_underlying(ib, underlying)
         underlying_price = self._underlying_price(symbol, underlying_ticker)
 
-        contracts = self._chain_contracts(ib, symbol, underlying, underlying_price, as_of)
+        contracts, trading_class = self._chain_contracts(
+            ib, symbol, underlying, underlying_price, as_of
+        )
         chain = self._quote_chain(ib, symbol, contracts)
         if not chain:
             raise MarketDataError(
@@ -368,6 +370,7 @@ class IBKRMarketData:
             iv_rank=iv_rank,
             as_of=as_of,
             chain=chain,
+            trading_class=trading_class,
         )
 
     def portfolio(self) -> Portfolio:
@@ -653,10 +656,17 @@ class IBKRMarketData:
         underlying: Any,
         underlying_price: Decimal,
         as_of: datetime,
-    ) -> list[Any]:
+    ) -> tuple[list[Any], str]:
         """Build the narrowed list of option contracts worth quoting.
 
         This is the step that makes the line budget achievable rather than
+        The selected chain's trading class is returned alongside the contracts
+        rather than discarded. It is the only place that knows which instrument
+        the quotes describe, and the algorithm needs it: an order carrying no
+        trading class resolves to the *standard* contract, so quoting a
+        non-standard class and submitting from those quotes would trade
+        something other than what was reviewed.
+
         merely enforced. The full chain for a liquid ETF is thousands of
         contracts; after filtering to the configured DTE band, to puts, and to a
         strike window around spot, it is tens. Filtering *before* requesting
@@ -675,7 +685,7 @@ class IBKRMarketData:
             logger.exception("Failed to request option chain parameters for %s", symbol)
             raise MarketDataError(f"{symbol}: cannot read option chain: {exc}") from exc
 
-        chain = self._preferred_chain(chains)
+        chain = self._preferred_chain(chains, symbol)
         if chain is None:
             raise MarketDataError(f"{symbol}: IBKR returned no option chain definition")
 
@@ -714,22 +724,47 @@ class IBKRMarketData:
             len(strikes),
             len(candidates),
         )
-        return self._qualify(ib, symbol, candidates)
+        return self._qualify(ib, symbol, candidates), trading_class
 
     @staticmethod
-    def _preferred_chain(chains: Sequence[Any]) -> Any | None:
+    def _preferred_chain(chains: Sequence[Any], symbol: str) -> Any | None:
         """Choose one chain definition from the several IBKR returns.
 
-        IBKR returns one row per exchange. Prefer SMART — the routing this
-        adapter quotes and trades on — and otherwise take the row listing the
-        most strikes, which is the most complete view of the same options.
+        IBKR returns one row per *(exchange, trading class)* pair — not one per
+        exchange, which is what an earlier version of this docstring said, and
+        the difference is the whole point of the second filter below.
+
+        Three preferences, in order:
+
+        1. **SMART**, the routing this adapter quotes and trades on. Unchanged,
+           and deliberately so: ``ib_async`` preserves ``SMART`` when qualifying
+           a contract precisely because substituting a concrete exchange can
+           produce an invalid one.
+        2. **The trading class matching the underlying.** Selection used to be
+           on strike count alone, so a row describing a *non-standard* class —
+           ``AAPL1``, an adjusted contract left behind by a split or a special
+           dividend — won whenever it happened to list more strikes. Options on
+           an adjusted class are a different instrument with a different
+           deliverable, so a longer list of them is not "a more complete view of
+           the same options"; it is a view of other options.
+        3. **The most strikes**, among rows that are otherwise equivalent. This
+           was the whole rule before and remains right where it was never wrong:
+           two rows for the same class really are two views of the same options.
+
+        A non-standard row is still returned when it is the only one. Whether a
+        trade on it is acceptable is a decision for the caller, which is why the
+        selected class travels on the snapshot rather than being discarded here.
         """
         usable = [c for c in chains if getattr(c, "expirations", None)]
         if not usable:
             return None
         smart = [c for c in usable if getattr(c, "exchange", "") == EXCHANGE]
         pool = smart or usable
-        return max(pool, key=lambda c: len(getattr(c, "strikes", ()) or ()))
+        # An absent tradingClass is not a match. `_chain_contracts` falls back to
+        # the symbol when building a contract, which is right there and would be
+        # wrong here: it would make an unlabelled row look confirmed-standard.
+        matching = [c for c in pool if getattr(c, "tradingClass", "") == symbol]
+        return max(matching or pool, key=lambda c: len(getattr(c, "strikes", ()) or ()))
 
     def _expiries_in_band(self, chain: Any, today: date) -> list[date]:
         """Expiries inside ``[min_dte, max_dte]``, ascending.

@@ -157,6 +157,17 @@ class MarketSnapshot:
     as_of: datetime
     chain: tuple[OptionQuote, ...]
 
+    #: The venue's trading class for the quoted chain, when it reported one.
+    #:
+    #: Empty means "not reported", which is not the same as "standard" and must
+    #: not be read as evidence of either. A value differing from ``symbol``
+    #: names a *non-standard* class -- an adjusted contract left behind by a
+    #: split or a special dividend -- whose deliverable differs from the
+    #: standard option at the same strike and expiry. It travels on the snapshot
+    #: because the quote and the order must refer to the same instrument, and
+    #: today only the quote side knows which one it is.
+    trading_class: str = ""
+
     def expiries(self) -> tuple[date, ...]:
         """Distinct expiries present in the chain, ascending."""
         return tuple(sorted({q.expiry for q in self.chain}))

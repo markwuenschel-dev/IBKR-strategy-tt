@@ -361,6 +361,26 @@ def evaluate(
         created_at=now,
     )
 
+    if snapshot.trading_class and snapshot.trading_class != symbol:
+        # The quote and the order must name the same instrument, and today they
+        # cannot be shown to: `broker._build_option` sends no tradingClass at
+        # all, so the venue would resolve the *standard* contract at this strike
+        # and expiry while the quote, the screen and the review all referred to
+        # the non-standard one. The failure mode is not a rejected order -- it
+        # is a filled one, on a different deliverable, that nothing in the
+        # record distinguishes from the intended trade. Refused here until the
+        # broker carries the class; see the tracked broker-side defect.
+        return NeedsDecision(
+            symbol=symbol,
+            reason=(
+                f"{symbol} quoted on the non-standard trading class "
+                f"{snapshot.trading_class!r}; the broker submits no trading "
+                f"class, so the order would name a different instrument than "
+                f"the one quoted and reviewed"
+            ),
+            proposal=proposal,
+        )
+
     if not portfolio.pending_orders_known:
         # Every guard above that could have refused this trade reads rows the
         # adapter synthesizes from still-working orders, and those rows are
