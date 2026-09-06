@@ -173,8 +173,45 @@ def broker(ib, **ibkr):
     return IBKRBroker(config.ibkr, FixedClock(SCAN_TIME), ib=ib)
 
 
-def test_the_client_contract_declares_the_account_enquiry():
-    """A conforming double cannot omit the call the guard depends on."""
+def test_a_session_that_cannot_be_asked_for_accounts_fails_closed():
+    """The previous version of this test could not fail, so it is gone.
+
+    It asserted `hasattr(IBClient, "managedAccounts")` -- that the Protocol
+    contains what the Protocol declares. True by construction, and it survived
+    every mutation of the guard it was supposed to protect.
+
+    The property that matters is what happens to a session object that cannot
+    answer the question: the guard must refuse and close, not skip itself. That
+    also proves the call site exists, which is what the old assertion was
+    reaching for and could not reach.
+    """
+
+    class Truncated:
+        """A client with no `managedAccounts` -- an older vendor, or a bad double."""
+
+        def __init__(self) -> None:
+            self._connected = False
+            self.disconnects = 0
+
+        def isConnected(self) -> bool:
+            return self._connected
+
+        def connect(self, host, port, clientId, timeout):
+            self._connected = True
+
+        def disconnect(self) -> None:
+            self._connected = False
+            self.disconnects += 1
+
+    ib = Truncated()
+
+    with pytest.raises(BrokerNotConnected, match="account list"):
+        broker(ib).connect()
+
+    assert ib.disconnects == 1, "an unusable session was left open"
+    assert not ib.isConnected()
+    # Secondary, and weak on its own: the typed contract names the call the
+    # behaviour above depends on, so a conforming double knows to supply it.
     assert hasattr(IBClient, "managedAccounts")
 
 
@@ -256,21 +293,76 @@ def test_the_connect_log_names_the_account_and_claims_nothing_about_paper(caplog
     assert "paper=" not in line, "the session cannot confirm paper; do not print it"
 
 
-# --- Q4: live is armed by intent AND identity -----------------------------
+# --- Q4: what live arming is, and what it is not ---------------------------
 
 
-def test_live_requires_both_the_flag_and_a_confirmed_account():
-    """`paper = false` alone is not arming; it never was, and now it says so.
+def test_a_deliberate_live_run_with_a_confirmed_account_proceeds():
+    """Renamed. It asserts one outcome, and its old name claimed two.
 
-    Two independent statements that must agree: the operator declares live, and
-    names the account. The venue then has to return that account.
+    `test_live_requires_both_the_flag_and_a_confirmed_account` described a
+    conjunction while asserting only this half, which is exactly the kind of
+    name that gets believed. What the flag actually does is pinned below.
     """
     ib = FakeIB(accounts=[ACCOUNT])
     live = broker(ib, paper=False, port=7496)
 
     live.connect()
 
-    assert ib.isConnected(), "a deliberate live run with a confirmed account proceeds"
+    assert ib.isConnected()
+
+
+def test_the_paper_flag_is_read_by_nothing_but_the_port_warning():
+    """The gap, pinned deliberately, because the README used to deny it.
+
+    Live-path authority was ruled to be `paper = false` AND a named account AND
+    the session returning it. Two of those three are enforced. The flag is not:
+    it has no reader outside the config module, so a `paper = true` run naming a
+    live account connects to it and trades -- and nothing objects.
+
+    This is not fixable here. IBKR exposes no paper/live indicator, so there is
+    nothing for the flag to be checked against; it can only be *recorded*. The
+    run-level audit record is where it gets its first real reader, and this test
+    is what makes that arrival announce itself instead of landing quietly.
+
+    Enumerated rather than grepped: a substring search would count the word in
+    docstrings and prose, which is how this gap stayed invisible.
+    """
+    import ast
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parent.parent / "ibkr_trader"
+    readers: dict[str, list[int]] = {}
+    for module in sorted(package.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        lines = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "paper"
+        ]
+        if lines:
+            readers[module.name] = lines
+
+    assert set(readers) == {"config.py"}, (
+        f"the paper flag acquired a reader outside config.py: {readers}. If that "
+        f"reader is the audit record, this test has done its job -- update it to "
+        f"state the new contract rather than deleting it."
+    )
+
+
+def test_a_paper_run_is_not_stopped_from_reaching_any_account_it_names():
+    """The consequence of the above, stated as behaviour rather than structure.
+
+    The account guard enforces identity, not mode: it asks whether the session
+    reached the account you named, and `paper = true` gives it nothing further
+    to ask. Naming a different account is what this guard catches; naming a
+    live one it cannot.
+    """
+    live_looking = "U1234567"
+    ib = FakeIB(accounts=[live_looking])
+
+    broker(ib, paper=True, account=live_looking).connect()
+
+    assert ib.isConnected(), "the flag stopped a connection it has no way to judge"
 
 
 def test_live_with_the_wrong_account_still_refuses():
@@ -279,6 +371,46 @@ def test_live_with_the_wrong_account_still_refuses():
 
     with pytest.raises(BrokerNotConnected):
         broker(ib, paper=False, port=7496).connect()
+
+
+# --- The operator-facing documents -----------------------------------------
+
+
+def test_the_operator_documents_do_not_overclaim_what_the_check_proves():
+    """The documents are half the deliverable, and nothing else guards them.
+
+    An operator decides what to point this at by reading these two files, so a
+    sentence here that overstates the guarantee is the same defect as a log line
+    that does -- and the log line has a test. Both must state the non-proof, and
+    neither may restate the enforcement claim the README carried until the
+    verification round caught it.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+
+    def prose(path):
+        """Emphasis out and case flattened: `does *not* prove` and `does NOT prove`
+        are the same statement, and neither file should have to phrase it one way
+        to satisfy a test."""
+        return (root / path).read_text(encoding="utf-8").replace("*", "").lower()
+
+    readme = prose("README.md")
+    example = prose("trader.example.toml")
+
+    for name, text in (("README.md", readme), ("trader.example.toml", example)):
+        assert "not prove" in text, f"{name} never states what the check cannot prove"
+        assert "paper account" in text, f"{name} does not name the property at issue"
+
+    withdrawn = [
+        "neither alone is enough",
+        "requires both `paper = false`",
+    ]
+    for claim in withdrawn:
+        assert claim not in readme, (
+            f"README.md claims {claim!r}, an enforcement of the paper flag that "
+            f"does not exist; see test_the_paper_flag_is_read_by_nothing_but_the_port_warning"
+        )
 
 
 # --- Q1(c): defence in depth on the read side -----------------------------

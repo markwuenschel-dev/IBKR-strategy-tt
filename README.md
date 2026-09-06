@@ -99,8 +99,18 @@ socket port", so a live TWS on 7497 would have passed the old check while an SSH
 tunnel or a container port-map would have been blocked by it. The port is a hint
 about intent; the account is evidence about the session.
 
-Deliberate live trading requires both `paper = false` and an account the session
-confirms. Neither alone is enough.
+**The `paper` flag enforces nothing, and this is deliberate to state plainly.**
+It has exactly two readers in the whole engine — its own declaration and the
+port warning above — so a `paper = true` run that names a live account will
+connect to that account and trade it. There is nothing for the flag to check
+against: IBKR exposes no paper/live indicator, so the process cannot tell which
+kind of session it opened. The flag is a declaration of intent with no runtime
+effect today; the account check is the only enforcement in this area, and it
+enforces *identity*, not mode. Giving the declaration its first real reader — a
+run-level record of the mode, the verified account and the endpoint — is the
+next change in this sequence, and it is a prerequisite for enabling live
+operation. `tests/test_account_identity.py` pins the current state, so that
+change cannot arrive silently.
 
 ## Testing
 
