@@ -226,6 +226,23 @@ def test_connecting_to_the_named_account_succeeds():
     assert adapter.verified_account == ACCOUNT
 
 
+def test_failed_reconnect_clears_the_previous_verified_account():
+    ib = FakeIB(accounts=[ACCOUNT])
+    adapter = broker(ib)
+    adapter.connect()
+    assert adapter.verified_account == ACCOUNT
+
+    # Simulate a transport loss followed by a connection to the wrong book.
+    ib._connected = False
+    ib._accounts = [OTHER]
+
+    with pytest.raises(BrokerNotConnected):
+        adapter.connect()
+
+    assert adapter.verified_account is None
+    assert not ib.isConnected()
+
+
 def test_connecting_to_a_different_account_refuses_to_start():
     """The whole point. The session opened, but not to the book we were told.
 

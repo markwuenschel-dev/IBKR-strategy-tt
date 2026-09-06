@@ -259,6 +259,8 @@ class IBKRBroker:
     @property
     def verified_account(self) -> str | None:
         """Account confirmed by ``managedAccounts()`` for this session."""
+        if not self.is_connected:
+            return None
         return self._verified_account
 
     @property
@@ -374,6 +376,7 @@ class IBKRBroker:
 
     def _close_quietly(self) -> None:
         """Drop the session without letting teardown replace the real failure."""
+        self._verified_account = None
         with contextlib.suppress(Exception):
             if self._ib is not None:
                 self._ib.disconnect()
