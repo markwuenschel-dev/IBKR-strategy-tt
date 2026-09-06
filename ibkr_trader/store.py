@@ -276,7 +276,7 @@ class SqliteStore:
 
     def runs(self) -> list[dict[str, Any]]:
         """Pass identities, oldest first."""
-        return self._query("SELECT * FROM runs ORDER BY started_at, run_id")
+        return self._query("SELECT * FROM runs ORDER BY rowid")
 
     def proposals(self) -> list[dict[str, Any]]:
         """All recorded trade proposals."""

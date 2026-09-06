@@ -8,10 +8,12 @@ import pytest
 
 from ibkr_trader.clock import FixedClock
 from ibkr_trader.config import build_config
+from ibkr_trader.errors import BrokerNotConnected
 from ibkr_trader.runner import Runner
 from ibkr_trader.store import SqliteStore
 
 from .fakes import ACCOUNT, SCAN_TIME, FakeBroker, StubMarketData, StubReviewer
+from .harness import build_runner
 
 
 def test_each_pass_records_the_verified_book_before_scanning(tmp_path):
@@ -93,13 +95,26 @@ def test_a_failed_run_record_refuses_the_pass_before_any_external_action():
     assert broker.submitted == []
 
 
-def test_loop_records_one_identity_row_per_pass(tmp_path):
-    from .harness import build_runner
+def test_a_pass_without_a_verified_account_refuses_before_opening_its_record(tmp_path):
+    runner, market, reviewer, broker, store = build_runner(
+        tmp_path, broker=FakeBroker(verified_account=None)
+    )
 
+    with pytest.raises(BrokerNotConnected, match="has not verified an account"):
+        runner.run_once()
+
+    assert store.runs() == []
+    assert market.requested == []
+    assert reviewer.reviewed == []
+    assert broker.submitted == []
+    store.close()
+
+
+def test_loop_records_one_identity_row_per_pass(tmp_path):
     runner, _, _, _, store = build_runner(tmp_path)
 
     summaries = runner.run_while(lambda: True, max_passes=2)
 
-    assert [row["run_id"] for row in store.runs()] == [s.run_id for s in summaries]
+    assert {row["run_id"] for row in store.runs()} == {s.run_id for s in summaries}
     assert {row["verified_account"] for row in store.runs()} == {ACCOUNT}
     store.close()

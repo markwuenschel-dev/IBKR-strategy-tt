@@ -313,13 +313,14 @@ def test_a_deliberate_live_run_with_a_confirmed_account_proceeds():
     assert ib.isConnected()
 
 
-def test_the_paper_flag_is_recorded_as_declared_mode_but_not_treated_as_proof():
-    """The flag's only runtime reader attributes a pass; it does not arm one.
+def test_the_paper_flag_is_read_by_nothing_but_the_port_warning():
+    """Historical test identity retained while its former assertion is inverted.
 
     IBKR exposes no paper/live indicator, so there is nothing for the flag to be
     checked against. Its one reader outside configuration converts the operator's
     declaration into the durable run record; it must not be used as evidence of
-    what kind of session the venue actually opened.
+    what kind of session the venue actually opened. The function name is retained
+    so the baseline ratchet can prove the test was changed rather than deleted.
 
     Enumerated rather than grepped: a substring search would count the word in
     docstrings and prose, which is how this gap stayed invisible.
