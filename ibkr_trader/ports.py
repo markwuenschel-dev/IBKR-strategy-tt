@@ -151,10 +151,30 @@ class Broker(Protocol):
         """False when submission cannot currently be attempted."""
         ...
 
+    @property
+    def verified_account(self) -> str | None:
+        """Account identity confirmed by the connected venue session."""
+        ...
+
 
 @runtime_checkable
 class Store(Protocol):
     """Durable record of what the system did."""
+
+    def start_run(
+        self,
+        run_id: str,
+        declared_mode: str,
+        verified_account: str,
+        host: str,
+        port: int,
+    ) -> None:
+        """Durably identify a pass before it processes any symbol.
+
+        Raises:
+            Exception: storage failures propagate and prevent the pass.
+        """
+        ...
 
     def record(self, result: SymbolResult, run_id: str) -> None:
         """Persist the outcome of one symbol attempt.
