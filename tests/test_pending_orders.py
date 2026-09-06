@@ -20,14 +20,14 @@ from ibkr_trader.config import build_config
 from ibkr_trader.models import Outcome, Portfolio, Position
 from ibkr_trader.scanner import IBKRMarketData
 
-from .fakes import SCAN_TIME, FakeBroker, StubMarketData, tradable_snapshot
+from .fakes import ACCOUNT, SCAN_TIME, FakeBroker, StubMarketData, tradable_snapshot
 from .harness import build_runner
 
 # --- layer 1: the scanner reports working orders ---------------------------
 
 
 def account_value(tag: str, value: str):
-    return SimpleNamespace(tag=tag, value=value, currency="USD", account="DU1")
+    return SimpleNamespace(tag=tag, value=value, currency="USD", account=ACCOUNT)
 
 
 def trade(symbol: str, qty: float, status: str, active: bool = True, account: str = ""):
@@ -60,7 +60,7 @@ class AccountStubIB:
 
 
 def market_data(ib):
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     return IBKRMarketData(config.ibkr, config.strategy, FixedClock(SCAN_TIME), ib=ib)
 
 

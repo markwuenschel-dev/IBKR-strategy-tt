@@ -18,12 +18,20 @@ scan_interval_seconds = 300.0
 
 [ibkr]
 host = "127.0.0.1"
-# 7497 = TWS paper, 4002 = Gateway paper. 7496/4001 are LIVE and are rejected
-# while paper = true.
+# 7497 = TWS paper, 4002 = Gateway paper; 7496/4001 are conventionally live.
+# A paper run on a live port only warns: IBKR documents these as defaults that
+# can be changed to any open socket, so the number is a hint about intent and
+# never evidence about the session. The account check below is the enforcement.
 port = 7497
 client_id = 1
 paper = true
-# account = "DU1234567"   # optional; required if the login has several accounts
+# REQUIRED. The account this process trades. Verified after connecting: the
+# session must report this exact account or the process refuses to start.
+#
+# This proves you reached the account you named. It does NOT prove that account
+# is a paper account -- IBKR exposes no paper/live indicator, and the "DU"
+# convention is undocumented. Paper safety is you naming the paper account.
+account = "DU1234567"
 connect_timeout_seconds = 10.0
 
 # Concurrent market-data lines. Hard ceiling is 200 - a larger value is

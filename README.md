@@ -78,7 +78,39 @@ Invalid configuration in trader.toml:
 ```
 
 Cross-field contradictions are caught too — a `target_dte` outside its own
-`min_dte`/`max_dte` band, a paper run pointed at a live-trading port.
+`min_dte`/`max_dte` band, or a missing `ibkr.account`.
+
+## Which account this trades
+
+`ibkr.account` is required, and it is checked against the session. After
+connecting, the process asks TWS which accounts it manages and refuses to start
+unless the configured one is among them, closing the session first.
+
+**What that proves, exactly:** that the process reached the account you named.
+It does *not* prove that account is a paper account. IBKR exposes no paper/live
+indicator anywhere in the connection handshake, the `DU` prefix everyone relies
+on is a convention IBKR has never documented, and this repository's own verified
+paper account — `DUR318607` — does not match the shape people usually assume.
+**Paper safety is you naming the paper account.**
+
+A paper run pointed at a conventionally live port (7496/4001) now *warns* rather
+than refusing. IBKR documents those as defaults that "can be changed to any open
+socket port", so a live TWS on 7497 would have passed the old check while an SSH
+tunnel or a container port-map would have been blocked by it. The port is a hint
+about intent; the account is evidence about the session.
+
+**The `paper` flag enforces nothing, and this is deliberate to state plainly.**
+It has exactly two readers in the whole engine — its own declaration and the
+port warning above — so a `paper = true` run that names a live account will
+connect to that account and trade it. There is nothing for the flag to check
+against: IBKR exposes no paper/live indicator, so the process cannot tell which
+kind of session it opened. The flag is a declaration of intent with no runtime
+effect today; the account check is the only enforcement in this area, and it
+enforces *identity*, not mode. Giving the declaration its first real reader — a
+run-level record of the mode, the verified account and the endpoint — is the
+next change in this sequence, and it is a prerequisite for enabling live
+operation. `tests/test_account_identity.py` pins the current state, so that
+change cannot arrive silently.
 
 ## Testing
 

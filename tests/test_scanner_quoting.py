@@ -42,7 +42,7 @@ from ibkr_trader.config import build_config
 from ibkr_trader.models import Right
 from ibkr_trader.scanner import EXCHANGE, IBKRMarketData
 
-from .fakes import SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME
 
 # --- vendor doubles ------------------------------------------------------
 
@@ -140,9 +140,10 @@ class BudgetIB:
 
 
 def adapter(ib, refresh_limit=None):
-    overrides: dict = {"universe": ["AAPL"]}
+    ibkr: dict = {"account": ACCOUNT}
     if refresh_limit is not None:
-        overrides["ibkr"] = {"refresh_limit": refresh_limit}
+        ibkr["refresh_limit"] = refresh_limit
+    overrides: dict = {"universe": ["AAPL"], "ibkr": ibkr}
     config = build_config(overrides)
     return IBKRMarketData(
         ibkr_config=config.ibkr,

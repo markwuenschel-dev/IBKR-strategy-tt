@@ -48,7 +48,7 @@ from ibkr_trader.scanner import IBKRMarketData
 from ibkr_trader.store import SqliteStore
 
 from . import fakes
-from .fakes import SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME
 
 # --- reading a Protocol -------------------------------------------------
 
@@ -116,7 +116,7 @@ def documented_raises(owner: type, name: str) -> set[str]:
 
 def production_adapters(tmp_path) -> list[tuple[type, Any]]:
     """One live instance of each production adapter, port by port."""
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     clock = FixedClock(SCAN_TIME)
     return [
         (
@@ -350,7 +350,7 @@ def test_a_conforming_double_that_omits_working_orders_defeats_the_guard():
     """
     from ibkr_trader.tastytrade import evaluate
 
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     snapshot = fakes.tradable_snapshot("AAPL")
 
     honours = fakes.StubMarketData(working_orders={"AAPL": 3})

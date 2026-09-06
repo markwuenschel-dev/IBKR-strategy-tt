@@ -42,7 +42,7 @@ from ibkr_trader.clock import FixedClock
 from ibkr_trader.config import build_config
 from ibkr_trader.scanner import EXCHANGE, IBKRMarketData
 
-from .fakes import SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME
 
 
 def row(trading_class, strikes, exchange=EXCHANGE, expirations=("20260220",)):
@@ -55,7 +55,7 @@ def row(trading_class, strikes, exchange=EXCHANGE, expirations=("20260220",)):
 
 
 def adapter():
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     return IBKRMarketData(
         ibkr_config=config.ibkr,
         strategy_config=config.strategy,

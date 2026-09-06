@@ -18,6 +18,8 @@ from ibkr_trader.clock import FixedClock
 from ibkr_trader.config import build_config
 from ibkr_trader.errors import BrokerError
 
+from .fakes import ACCOUNT
+
 SCAN_TIME = datetime(2026, 1, 15, 14, 30, tzinfo=UTC)
 
 
@@ -50,7 +52,12 @@ class RecordingBroker:
 def config_for(tmp_path):
     db = tmp_path / "trader.sqlite3"
     return build_config(
-        {"universe": ["AAPL"], "database_path": db.as_posix()}, source="<test>"
+        {
+            "universe": ["AAPL"],
+            "database_path": db.as_posix(),
+            "ibkr": {"account": ACCOUNT},
+        },
+        source="<test>",
     )
 
 
@@ -106,7 +113,9 @@ def test_a_completed_run_closes_the_database(tmp_path, monkeypatch):
     path = tmp_path / "trader.toml"
     db = tmp_path / "trader.sqlite3"
     path.write_text(
-        f"universe = ['AAPL']\ndatabase_path = '{db.as_posix()}'\n", encoding="utf-8"
+        f"universe = ['AAPL']\ndatabase_path = '{db.as_posix()}'\n"
+        f"\n[ibkr]\naccount = '{ACCOUNT}'\n",
+        encoding="utf-8",
     )
 
     exit_code = main(["run", "--config", str(path)])
@@ -145,7 +154,9 @@ def test_a_failing_disconnect_does_not_destroy_the_documented_exit_code(
     path = tmp_path / "trader.toml"
     db = tmp_path / "trader.sqlite3"
     path.write_text(
-        f"universe = ['AAPL']\ndatabase_path = '{db.as_posix()}'\n", encoding="utf-8"
+        f"universe = ['AAPL']\ndatabase_path = '{db.as_posix()}'\n"
+        f"\n[ibkr]\naccount = '{ACCOUNT}'\n",
+        encoding="utf-8",
     )
 
     exit_code = main(["run", "--config", str(path)])

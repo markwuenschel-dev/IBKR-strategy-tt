@@ -32,7 +32,7 @@ from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import Right
 from ibkr_trader.scanner import CURRENCY, EXCHANGE, IBKRMarketData
 
-from .fakes import SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME
 
 # --- a fake ib_async module surface --------------------------------------
 #
@@ -92,7 +92,7 @@ class FakeIB:
 
 
 def adapter(ib=None, api=FAKE_API, **overrides):
-    config = build_config({"universe": ["AAPL"], **overrides})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}, **overrides})
     return IBKRMarketData(
         ibkr_config=config.ibkr,
         strategy_config=config.strategy,

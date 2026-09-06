@@ -33,6 +33,7 @@ from ibkr_trader.models import NeedsDecision, Outcome, Portfolio, TradeProposal
 from ibkr_trader.tastytrade import evaluate
 
 from .fakes import (
+    ACCOUNT,
     SCAN_TIME,
     FakeBroker,
     StubMarketData,
@@ -76,7 +77,7 @@ def test_the_adapter_reports_the_ambiguity_instead_of_discarding_it():
 def config_pair():
     from ibkr_trader.config import build_config
 
-    config = build_config({"universe": ["AAPL"]})
+    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
     return config.strategy, config.risk
 
 
