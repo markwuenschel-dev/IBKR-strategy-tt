@@ -1,10 +1,11 @@
 """Durable record of what the system did.
 
-Five small tables, one row per fact. This is a record of history, not runtime
-state: nothing here is read back to decide what the runner does next, and losing
-the file would cost the audit trail, not the system's ability to operate. That
-is deliberate — authoritative mutable cross-process state is what the previous
-architecture died of.
+Six small tables, one row per fact. This is a record of history, not mutable
+coordination state: nothing here is read back to decide what the runner does
+next. One write is deliberately on the critical path, however: a pass must
+record the verified account it is about to trade before it may process a
+symbol. Losing the file therefore stops new passes rather than permitting
+orders whose account provenance cannot be reconstructed.
 
 Decimals are stored as TEXT so a price round-trips exactly. Timestamps are
 stored as ISO-8601 strings in UTC.
@@ -21,6 +22,15 @@ from .clock import Clock, SystemClock
 from .models import SymbolResult, leg_payload
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id           TEXT PRIMARY KEY,
+    declared_mode    TEXT NOT NULL,
+    verified_account TEXT NOT NULL,
+    host             TEXT NOT NULL,
+    port             INTEGER NOT NULL,
+    started_at       TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS symbol_attempts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT    NOT NULL,
@@ -119,6 +129,38 @@ class SqliteStore:
     def close(self) -> None:
         """Close the underlying connection."""
         self._conn.close()
+
+    def start_run(
+        self,
+        run_id: str,
+        declared_mode: str,
+        verified_account: str,
+        host: str,
+        port: int,
+    ) -> None:
+        """Persist the identity of a pass before it may process any symbol.
+
+        Unlike symbol-attempt recording, failure here propagates and aborts the
+        pass. Trading without a durable statement of the verified account would
+        recreate the exact audit ambiguity this row exists to close.
+
+        Raises:
+            Exception: the underlying storage failure, unchanged.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO runs "
+                "(run_id, declared_mode, verified_account, host, port, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    declared_mode,
+                    verified_account,
+                    host,
+                    port,
+                    self._clock.now().isoformat(),
+                ),
+            )
 
     def record(self, result: SymbolResult, run_id: str) -> None:
         """Persist everything known about one symbol attempt, atomically.
@@ -231,6 +273,10 @@ class SqliteStore:
         return self._query(
             "SELECT * FROM symbol_attempts WHERE run_id = ? ORDER BY id", (run_id,)
         )
+
+    def runs(self) -> list[dict[str, Any]]:
+        """Pass identities, oldest first."""
+        return self._query("SELECT * FROM runs ORDER BY rowid")
 
     def proposals(self) -> list[dict[str, Any]]:
         """All recorded trade proposals."""

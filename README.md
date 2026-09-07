@@ -99,18 +99,13 @@ socket port", so a live TWS on 7497 would have passed the old check while an SSH
 tunnel or a container port-map would have been blocked by it. The port is a hint
 about intent; the account is evidence about the session.
 
-**The `paper` flag enforces nothing, and this is deliberate to state plainly.**
-It has exactly two readers in the whole engine — its own declaration and the
-port warning above — so a `paper = true` run that names a live account will
-connect to that account and trade it. There is nothing for the flag to check
-against: IBKR exposes no paper/live indicator, so the process cannot tell which
-kind of session it opened. The flag is a declaration of intent with no runtime
-effect today; the account check is the only enforcement in this area, and it
-enforces *identity*, not mode. Giving the declaration its first real reader — a
-run-level record of the mode, the verified account and the endpoint — is the
-next change in this sequence, and it is a prerequisite for enabling live
-operation. `tests/test_account_identity.py` pins the current state, so that
-change cannot arrive silently.
+**The `paper` flag declares intent; it does not prove the venue's mode.** IBKR
+exposes no paper/live indicator, so the process cannot independently tell which
+kind of session it opened. The account check enforces *identity*, not mode.
+Before each pass scans its first symbol, the engine durably records the declared
+mode, the account confirmed by the session, and the connection endpoint in the
+`runs` table. If that row cannot be written, the pass does not start and no
+order can be submitted without account provenance.
 
 ## Testing
 
@@ -152,12 +147,15 @@ working order occupies a concentration slot. Set
 
 ## Recording
 
-Five tables: `symbol_attempts`, `trade_proposals`, `reviews`, `orders`, `fills`.
+Six tables: `runs`, `symbol_attempts`, `trade_proposals`, `reviews`, `orders`,
+`fills`.
 
-This is a record of history, not runtime state. Nothing is read back to decide
-what the runner does next; losing the file would cost the audit trail, not the
-ability to operate. One `proposal_id` names the trade in the proposal row, the
-review, the broker's `orderRef`, and the fill.
+This is a record of history, not mutable coordination state. Nothing is read
+back to decide what the runner does next. A new pass nevertheless requires its
+`runs` row to commit before scanning, so losing or locking the file stops new
+orders instead of allowing trades whose account provenance cannot be recovered.
+One `proposal_id` names the trade in the proposal row, the review, the broker's
+`orderRef`, and the fill.
 
 ## Verified against live IBKR paper
 

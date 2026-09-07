@@ -247,6 +247,7 @@ class IBKRBroker:
         self._clock = clock
         self._ib = ib
         self._api = api
+        self._verified_account: str | None = None
 
     # -- connection --------------------------------------------------------
 
@@ -254,6 +255,13 @@ class IBKRBroker:
     def is_connected(self) -> bool:
         """False when submission cannot currently be attempted."""
         return self._ib is not None and bool(self._ib.isConnected())
+
+    @property
+    def verified_account(self) -> str | None:
+        """Account confirmed by ``managedAccounts()`` for this session."""
+        if not self.is_connected:
+            return None
+        return self._verified_account
 
     @property
     def client(self) -> IBClient:
@@ -289,10 +297,12 @@ class IBKRBroker:
         if self._ib is None:
             self._ib = self._require_api().IB()
 
+        target = f"{self._config.host}:{self._config.port} clientId={self._config.client_id}"
         if self._ib.isConnected():
+            if self._verified_account is None:
+                self._require_configured_account(target)
             return
 
-        target = f"{self._config.host}:{self._config.port} clientId={self._config.client_id}"
         try:
             self._ib.connect(
                 host=self._config.host,
@@ -362,9 +372,11 @@ class IBKRBroker:
                 f"accounts this session reports ({', '.join(accounts)}); refusing "
                 f"to trade a book that was not named"
             )
+        self._verified_account = self._config.account
 
     def _close_quietly(self) -> None:
         """Drop the session without letting teardown replace the real failure."""
+        self._verified_account = None
         with contextlib.suppress(Exception):
             if self._ib is not None:
                 self._ib.disconnect()
@@ -375,6 +387,7 @@ class IBKRBroker:
         Raises:
             BrokerError: the transport failed while closing.
         """
+        self._verified_account = None
         if self._ib is None:
             return
         try:

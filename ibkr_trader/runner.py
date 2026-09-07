@@ -188,6 +188,18 @@ class Runner:
     def run_once(self) -> PassSummary:
         """Process every configured symbol exactly once."""
         run_id = uuid.uuid4().hex
+        verified_account = self._broker.verified_account
+        if verified_account is None:
+            raise BrokerNotConnected(
+                "the broker has not verified an account; refusing to start a pass"
+            )
+        self._store.start_run(
+            run_id=run_id,
+            declared_mode="paper" if self._config.ibkr.paper else "live",
+            verified_account=verified_account,
+            host=self._config.ibkr.host,
+            port=self._config.ibkr.port,
+        )
         log.info("starting pass %s over %d symbols", run_id, len(self._config.universe))
 
         results: list[SymbolResult] = []

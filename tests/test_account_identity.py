@@ -217,11 +217,30 @@ def test_a_session_that_cannot_be_asked_for_accounts_fails_closed():
 
 def test_connecting_to_the_named_account_succeeds():
     ib = FakeIB(accounts=[ACCOUNT])
+    adapter = broker(ib)
 
-    broker(ib).connect()
+    adapter.connect()
 
     assert ib.isConnected()
     assert ib.disconnects == 0
+    assert adapter.verified_account == ACCOUNT
+
+
+def test_failed_reconnect_clears_the_previous_verified_account():
+    ib = FakeIB(accounts=[ACCOUNT])
+    adapter = broker(ib)
+    adapter.connect()
+    assert adapter.verified_account == ACCOUNT
+
+    # Simulate a transport loss followed by a connection to the wrong book.
+    ib._connected = False
+    ib._accounts = [OTHER]
+
+    with pytest.raises(BrokerNotConnected):
+        adapter.connect()
+
+    assert adapter.verified_account is None
+    assert not ib.isConnected()
 
 
 def test_connecting_to_a_different_account_refuses_to_start():
@@ -312,17 +331,13 @@ def test_a_deliberate_live_run_with_a_confirmed_account_proceeds():
 
 
 def test_the_paper_flag_is_read_by_nothing_but_the_port_warning():
-    """The gap, pinned deliberately, because the README used to deny it.
+    """Historical test identity retained while its former assertion is inverted.
 
-    Live-path authority was ruled to be `paper = false` AND a named account AND
-    the session returning it. Two of those three are enforced. The flag is not:
-    it has no reader outside the config module, so a `paper = true` run naming a
-    live account connects to it and trades -- and nothing objects.
-
-    This is not fixable here. IBKR exposes no paper/live indicator, so there is
-    nothing for the flag to be checked against; it can only be *recorded*. The
-    run-level audit record is where it gets its first real reader, and this test
-    is what makes that arrival announce itself instead of landing quietly.
+    IBKR exposes no paper/live indicator, so there is nothing for the flag to be
+    checked against. Its one reader outside configuration converts the operator's
+    declaration into the durable run record; it must not be used as evidence of
+    what kind of session the venue actually opened. The function name is retained
+    so the baseline ratchet can prove the test was changed rather than deleted.
 
     Enumerated rather than grepped: a substring search would count the word in
     docstrings and prose, which is how this gap stayed invisible.
@@ -342,11 +357,8 @@ def test_the_paper_flag_is_read_by_nothing_but_the_port_warning():
         if lines:
             readers[module.name] = lines
 
-    assert set(readers) == {"config.py"}, (
-        f"the paper flag acquired a reader outside config.py: {readers}. If that "
-        f"reader is the audit record, this test has done its job -- update it to "
-        f"state the new contract rather than deleting it."
-    )
+    assert set(readers) == {"config.py", "runner.py"}
+    assert len(readers["runner.py"]) == 1
 
 
 def test_a_paper_run_is_not_stopped_from_reaching_any_account_it_names():

@@ -166,11 +166,13 @@ class FakeBroker:
         message: str = "",
         error: Exception | None = None,
         connected: bool = True,
+        verified_account: str | None = "DU1234567",
     ) -> None:
         self._outcome = outcome
         self._message = message
         self._error = error
         self._connected = connected
+        self._verified_account = verified_account
         self.submitted: list[TradeProposal] = []
         self.connect_calls = 0
         self.disconnect_calls = 0
@@ -183,6 +185,10 @@ class FakeBroker:
     def is_connected(self) -> bool:
         return self._connected
 
+    @property
+    def verified_account(self) -> str | None:
+        return self._verified_account
+
     def connect(self) -> None:
         """Nothing to establish, but the port declares it and cli.py calls it."""
         self._connected = True
@@ -191,6 +197,7 @@ class FakeBroker:
     def disconnect(self) -> None:
         """Idempotent, and counted -- teardown asserts it happened exactly once."""
         self._connected = False
+        self._verified_account = None
         self.disconnect_calls += 1
 
     def submit(self, proposal: TradeProposal) -> ExecutionResult:

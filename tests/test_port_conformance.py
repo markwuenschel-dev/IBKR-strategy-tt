@@ -238,6 +238,14 @@ def test_the_signature_check_rejects_a_dropped_parameter():
     """
 
     class UntypedStore:
+        def start_run(
+            self,
+            run_id: str,
+            declared_mode: str,
+            verified_account: str,
+            host: str,
+            port: int,
+        ) -> None: ...
         def record(self, result: SymbolResult) -> None: ...
         def close(self) -> None: ...
 
