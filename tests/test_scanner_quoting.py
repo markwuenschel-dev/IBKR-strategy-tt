@@ -104,6 +104,7 @@ class BudgetIB:
         self.qualify_batches: list[int] = []
         self.quote_requests = 0
         self.cancels = 0
+        self.history_requests = 0
         self.market_data_type: int | None = None
 
     # -- the two enforcement sites -------------------------------------
@@ -133,13 +134,14 @@ class BudgetIB:
         return list(self._chains)
 
     def reqHistoricalData(self, contract, **kwargs):
+        self.history_requests += 1
         return list(self._bars)
 
     def sleep(self, seconds):
         raise AssertionError("a healthy ticker must not need polling")
 
 
-def adapter(ib, refresh_limit=None):
+def adapter(ib, refresh_limit=None, clock=None):
     ibkr: dict = {"account": ACCOUNT}
     if refresh_limit is not None:
         ibkr["refresh_limit"] = refresh_limit
@@ -148,7 +150,7 @@ def adapter(ib, refresh_limit=None):
     return IBKRMarketData(
         ibkr_config=config.ibkr,
         strategy_config=config.strategy,
-        clock=FixedClock(SCAN_TIME),
+        clock=clock or FixedClock(SCAN_TIME),
         ib=ib,
         api=FAKE_API,
     )
@@ -237,7 +239,16 @@ def chain_row(strikes, expiries, trading_class="AAPL"):
 
 
 class SnapshotIB(BudgetIB):
-    """A BudgetIB that also answers the underlying-price request."""
+    """A BudgetIB that also answers the underlying-price request.
+
+    ``underlying_iv`` is what generic tick 106 puts in the underlying ticker's
+    ``impliedVolatility``; left NaN by default, as IBKR leaves it before the
+    tick arrives, so the strike window falls back to its floor.
+    """
+
+    def __init__(self, chains=(), bars=(), underlying_iv=math.nan):
+        super().__init__(chains, bars)
+        self._underlying_iv = underlying_iv
 
     def reqMktData(self, contract, generic_ticks, snapshot, regulatory):
         if getattr(contract, "strike", None) is None:
@@ -246,7 +257,12 @@ class SnapshotIB(BudgetIB):
             self.open.add(id(contract))
             self.peak = max(self.peak, len(self.open))
             return SimpleNamespace(
-                contract=contract, last=195.0, bid=194.9, ask=195.1, close=190.0
+                contract=contract,
+                last=195.0,
+                bid=194.9,
+                ask=195.1,
+                close=190.0,
+                impliedVolatility=self._underlying_iv,
             )
         return super().reqMktData(contract, generic_ticks, snapshot, regulatory)
 
@@ -315,6 +331,117 @@ def test_a_chain_listing_only_strikes_above_spot_fails_loudly():
         adapter(ib, refresh_limit=4).snapshot("AAPL")
 
     assert ib.open == set(), "a failed pass must not leak lines either"
+
+
+def test_the_underlying_iv_widens_the_strike_window_through_a_real_snapshot():
+    """The reading has to travel from the ticker to the window, not only exist.
+
+    Spot is 195. At the 0.15 floor the window stops at 165.75, so 150 is out.
+    At IV 0.60 the window is 1.2 * 0.60 * sqrt(60/365) = 0.292, the floor
+    drops to 138.1 and 150 is in. Read off ``Ticker.impliedVolatility`` --
+    which is where generic tick 106 lands in ib_async 2.1.
+    """
+    expiries = [SCAN_TIME.date() + timedelta(days=30)]
+    chains = [chain_row([150, 170, 180, 190, 195], expiries)]
+
+    calm = SnapshotIB(chains=chains, bars=historical_bars())
+    calm_strikes = {float(q.strike) for q in adapter(calm, 4).snapshot("AAPL").chain}
+    assert 150.0 not in calm_strikes, "the floor should not reach 23% OTM"
+    assert 170.0 in calm_strikes
+
+    volatile = SnapshotIB(chains=chains, bars=historical_bars(), underlying_iv=0.60)
+    volatile_strikes = {float(q.strike) for q in adapter(volatile, 4).snapshot("AAPL").chain}
+    assert 150.0 in volatile_strikes, f"IV 0.60 did not widen the window: {volatile_strikes}"
+
+
+# --- the IV-rank cache ----------------------------------------------------
+#
+# IBKR paces historical data at roughly 60 requests per 10 minutes. A 102-name
+# universe on a 30-minute loop would exceed that every pass unless the rank --
+# a function of daily bars, so constant within a market date -- is remembered.
+
+
+def _one_day_chain():
+    # Mid-band, not on ``min_dte``: one of the tests below advances the clock
+    # a day, and an expiry sitting exactly on the boundary would then fall out
+    # of the DTE band and fail the pass for a reason unrelated to the cache.
+    expiries = [SCAN_TIME.date() + timedelta(days=45)]
+    return [chain_row([180, 185, 190, 195], expiries)]
+
+
+def test_a_second_snapshot_on_the_same_market_date_requests_no_history():
+    """The hit skips ``reqHistoricalData`` entirely; nothing else is skipped."""
+    ib = SnapshotIB(chains=_one_day_chain(), bars=historical_bars())
+    market = adapter(ib, 4)
+
+    first = market.snapshot("AAPL")
+    after_first = ib.history_requests
+    assert after_first == 1, f"the first pass should fetch history once, not {after_first}"
+
+    quotes_before = ib.quote_requests
+    second = market.snapshot("AAPL")
+
+    assert ib.history_requests == after_first, "the second pass re-fetched history"
+    assert second.iv_rank == first.iv_rank
+    assert ib.quote_requests > quotes_before, "quotes must still be refreshed every pass"
+    assert ib.open == set()
+
+
+def test_the_cache_is_per_symbol():
+    """A hit for AAPL must not answer for MSFT."""
+    ib = SnapshotIB(chains=_one_day_chain(), bars=historical_bars())
+    market = adapter(ib, 4)
+
+    market.snapshot("AAPL")
+    market.snapshot("MSFT")
+
+    assert ib.history_requests == 2
+
+
+def test_a_new_market_date_refetches_the_history():
+    """Daily bars gain a row at the close; the next market date must see it.
+
+    The clock crosses midnight *Eastern*, which is what the key is built on.
+    SCAN_TIME is 14:30 UTC on the 15th; 12 hours later it is 02:30 UTC on the
+    16th, still the 15th in New York, and no refetch is due yet. Six more
+    hours make it the 16th in both zones.
+    """
+    clock = FixedClock(SCAN_TIME)
+    ib = SnapshotIB(chains=_one_day_chain(), bars=historical_bars())
+    market = adapter(ib, 4, clock=clock)
+
+    market.snapshot("AAPL")
+    clock.advance(12 * 3600)  # 02:30 UTC on the 16th == 21:30 Eastern on the 15th
+    market.snapshot("AAPL")
+    assert ib.history_requests == 1, "still the same Eastern market date"
+
+    clock.advance(6 * 3600)  # 08:30 UTC on the 16th == 03:30 Eastern on the 16th
+    market.snapshot("AAPL")
+    assert ib.history_requests == 2, "a new market date must refetch"
+
+
+def test_a_failed_rank_is_not_cached():
+    """A transient failure must not be remembered for the rest of the day.
+
+    With no bars both the IV and the realized-volatility series are empty, so
+    ``_iv_rank`` raises after two history requests. When the bars appear on
+    the next pass the rank must be computed, not the failure replayed.
+    """
+    from ibkr_trader.errors import MarketDataError
+
+    ib = SnapshotIB(chains=_one_day_chain(), bars=[])
+    market = adapter(ib, 4)
+
+    with pytest.raises(MarketDataError, match="no usable volatility history"):
+        market.snapshot("AAPL")
+    failed_requests = ib.history_requests
+    assert failed_requests == 2, "IV then TRADES: both series were tried"
+
+    ib._bars = historical_bars()
+    snapshot = market.snapshot("AAPL")
+
+    assert ib.history_requests > failed_requests, "the failure was served from cache"
+    assert 0.0 <= snapshot.iv_rank <= 100.0
 
 
 def test_a_non_standard_trading_class_reaches_the_snapshot_intact():

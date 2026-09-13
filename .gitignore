@@ -11,6 +11,10 @@ dist/
 # Local runtime state and secrets
 trader.toml
 *.sqlite3
+# SQLite write-ahead log sidecars; they appear next to any database the moment
+# it is opened, and are never part of the committed record.
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Coverage database
 .coverage

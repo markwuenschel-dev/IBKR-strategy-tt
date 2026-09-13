@@ -7,6 +7,8 @@ they run with `ib_async` absent. Each fails against the pre-fix scanner.
 from __future__ import annotations
 
 import contextlib
+import logging
+import math
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -20,8 +22,10 @@ from ibkr_trader.scanner import IBKRMarketData, _whole_contracts
 from .fakes import ACCOUNT, SCAN_TIME
 
 
-def adapter(ib=None):
-    config = build_config({"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}})
+def adapter(ib=None, **strategy):
+    config = build_config(
+        {"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}, "strategy": strategy}
+    )
     return IBKRMarketData(
         ibkr_config=config.ibkr,
         strategy_config=config.strategy,
@@ -128,11 +132,81 @@ def test_no_strike_above_spot_is_quoted():
     """
     chain = SimpleNamespace(strikes=[170, 180, 190, 195, 200, 210, 220])
 
-    strikes = adapter()._strikes_near(chain, Decimal("195.00"))
+    strikes = adapter()._strikes_near(chain, Decimal("195.00"), window=0.15)
 
     assert strikes, "the window collapsed to nothing"
     assert max(strikes) <= 195.0, f"quoted in-the-money puts: {strikes}"
     assert 180 in strikes, "the useful strikes below spot were dropped"
+
+
+def test_the_window_is_applied_as_a_fraction_of_spot_with_no_extra_margin():
+    """``low = spot * (1 - window)`` exactly; the old fixed subtraction is gone."""
+    chain = SimpleNamespace(strikes=[150, 160, 170, 180, 190, 195])
+
+    strikes = adapter()._strikes_near(chain, Decimal("200.00"), window=0.20)
+
+    # 200 * 0.80 = 160 sits on the boundary and is inside; 150 is not.
+    assert strikes == [160, 170, 180, 190, 195]
+
+
+# --- the volatility-scaled strike window ---------------------------------
+#
+# ``max(strike_window_pct, strike_window_iv_multiple * iv * sqrt(max_dte / 365))``
+# with the defaults 0.15 / 1.2 / 60.
+
+
+def test_the_floor_wins_when_the_underlying_is_calm():
+    """At IV 0.15 the scaled term is 1.2 * 0.15 * sqrt(60/365) = 0.073 < 0.15."""
+    assert adapter()._strike_window("AAPL", 0.15) == pytest.approx(0.15)
+
+
+def test_the_scaled_window_wins_when_the_underlying_is_volatile():
+    """IV 0.60 over 60 days: 1.2 * 0.60 * sqrt(60/365) = 0.2919 > 0.15.
+
+    This is the case the fixed window got wrong: on a name this volatile the
+    0.20-delta put sits well past 15% OTM, so the whole short band fell outside
+    the window and the symbol reported "no listed strike".
+    """
+    window = adapter()._strike_window("TSLA", 0.60)
+
+    assert window == pytest.approx(1.2 * 0.60 * math.sqrt(60 / 365))
+    assert window == pytest.approx(0.292, abs=0.001)
+
+
+def test_the_multiple_and_horizon_are_read_from_the_configuration():
+    """Not constants: both the multiple and ``max_dte`` come from the config."""
+    window = adapter(strike_window_iv_multiple=2.0, max_dte=90)._strike_window("X", 0.50)
+
+    assert window == pytest.approx(2.0 * 0.50 * math.sqrt(90 / 365))
+
+
+def test_a_multiple_of_zero_disables_the_scaling():
+    """The documented off switch: IV is ignored and the floor stands alone."""
+    assert adapter(strike_window_iv_multiple=0.0)._strike_window("TSLA", 0.60) == 0.15
+
+
+@pytest.mark.parametrize("implied_volatility", [None, 0.0, -0.3])
+def test_a_missing_or_unusable_iv_falls_back_to_the_floor(implied_volatility):
+    """IBKR often has not sent tick 106 yet; that must not fail the symbol.
+
+    NaN never reaches here -- the caller reads the ticker through ``_finite``
+    -- so None, zero and a negative reading are the whole unusable set.
+    """
+    assert adapter()._strike_window("AAPL", implied_volatility) == pytest.approx(0.15)
+
+
+def test_the_chosen_window_and_its_inputs_are_logged_for_audit(caplog):
+    """A run's strike selection must be reconstructible from its log alone."""
+    with caplog.at_level(logging.DEBUG, logger="ibkr_trader.scanner"):
+        adapter()._strike_window("TSLA", 0.60)
+        adapter()._strike_window("AAPL", None)
+
+    messages = [record.getMessage() for record in caplog.records]
+    scaled = next(m for m in messages if m.startswith("TSLA:"))
+    assert "iv-scaled" in scaled
+    assert "iv=0.6000" in scaled and "max_dte=60" in scaled and "floor=0.1500" in scaled
+    fallback = next(m for m in messages if m.startswith("AAPL:"))
+    assert "floor" in fallback and "unavailable" in fallback
 
 
 # --- INT-032 -------------------------------------------------------------

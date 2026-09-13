@@ -20,13 +20,13 @@ parameter, so construction raises ``TypeError``.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
-from ibkr_trader.clock import FixedClock
+from ibkr_trader.clock import FixedClock, market_date
 from ibkr_trader.config import build_config
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import Right
@@ -149,7 +149,7 @@ def test_the_candidate_chain_is_built_through_the_injected_api():
     underlying = SimpleNamespace(symbol="AAPL", conId=1234)
 
     candidates, trading_class = adapter(ib)._chain_contracts(
-        ib, "AAPL", underlying, Decimal("195.00"), as_of
+        ib, "AAPL", underlying, Decimal("195.00"), as_of, implied_volatility=None
     )
 
     assert ib.chain_requests == [("AAPL", "", "STK", 1234)]
@@ -163,6 +163,35 @@ def test_the_candidate_chain_is_built_through_the_injected_api():
     assert {c.expiry for c in candidates} == {d.strftime("%Y%m%d") for d in expiries}
     # Two expiries x the strikes inside the window around 195.
     assert len(candidates) == 2 * len({c.strike for c in candidates})
+
+
+def test_expiries_are_counted_from_the_eastern_market_date_not_the_utc_date():
+    """After 8 pm Eastern the UTC date is already tomorrow.
+
+    ``as_of`` is UTC. At 02:30 UTC on the 16th it is still the evening of the
+    15th in New York, and an expiry is a US calendar date, so DTE must be
+    counted from the 15th. Counting from the UTC date shifts every DTE by one:
+    the expiry sitting exactly on ``min_dte`` is dropped and the one a day past
+    ``max_dte`` is admitted. Both boundaries are asserted.
+    """
+    as_of = datetime(2026, 1, 16, 2, 30, tzinfo=UTC)
+    market_day = date(2026, 1, 15)
+    assert market_date(as_of) == market_day, "the fixture must straddle midnight"
+
+    strategy = adapter()._strategy_config
+    on_min = market_day + timedelta(days=strategy.min_dte)  # 30 DTE Eastern, 29 UTC
+    past_max = market_day + timedelta(days=strategy.max_dte + 1)  # 61 Eastern, 60 UTC
+    ib = FakeIB(chains=[chain_definition([190, 195], [on_min, past_max])])
+    underlying = SimpleNamespace(symbol="AAPL", conId=1234)
+
+    candidates, _ = adapter(ib)._chain_contracts(
+        ib, "AAPL", underlying, Decimal("195.00"), as_of, implied_volatility=None
+    )
+
+    expiries = {c.expiry for c in candidates}
+    assert expiries == {on_min.strftime("%Y%m%d")}, (
+        f"expected only the {strategy.min_dte}-DTE expiry, got {sorted(expiries)}"
+    )
 
 
 def test_the_vendor_module_is_never_loaded_when_an_api_is_injected(monkeypatch):

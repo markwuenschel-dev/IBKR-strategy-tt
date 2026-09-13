@@ -2,32 +2,64 @@
 
 This is the whole system:
 
-    scan -> tastytrade -> review -> trade -> record -> next symbol
+    scan every symbol -> rank the proposals -> review and trade the best -> record
 
 One process, one loop, no scheduler, no controller, no worker, no claims, no
 leases, no gates, no receipts. If you want to know what this application does,
-:meth:`Runner._process_symbol` is the answer and it fits on a screen.
+:meth:`Runner.run_once` is the answer, and the two per-symbol methods it calls
+each fit on a screen.
+
+A pass has five phases:
+
+0. **Start.** Refuse unless the broker has verified an account; open the run
+   record.
+A. **Manage.** The spreads already on the book are worked first, by
+   :class:`~ibkr_trader.manager.Manager`: fills reconciled, profit targets
+   rested, the 21-DTE rule applied. This runs before any symbol is quoted, so
+   an existing position is dealt with before a new one is considered, and a
+   failure in it is recorded as one management error rather than stopping the
+   scan.
+B. **Scan.** Every symbol in the universe is quoted and evaluated. A symbol the
+   algorithm declines, cannot rule on, or fails on is recorded on the spot. A
+   symbol that produces a proposal is *held as a candidate*: nothing is
+   recorded or reviewed for it yet.
+C. **Rank.** The candidates are ordered best first by :mod:`~ibkr_trader.ranking`,
+   from the figures the strategy says to prefer.
+D. **Submit.** The free position slots are read from a fresh portfolio, and the
+   candidates are offered to the reviewer in rank order until those slots are
+   spent. Each is re-quoted and re-evaluated first, because with a hundred-name
+   universe the quote it was ranked on may be many minutes old. Candidates
+   left over once the slots are used up are recorded as ``NOT_SELECTED``
+   without spending a review.
 
 Two properties are load-bearing and everything else follows from them:
 
-1. **Symbols are independent.** Each one is processed inside its own boundary.
-   An ordinary failure on SPY produces a recorded outcome for SPY and nothing
-   else; QQQ is evaluated next regardless. No symbol-local failure is allowed to
-   become a day-wide mode.
+1. **Symbols are independent for failures.** Each one is quoted, evaluated,
+   and traded inside its own boundary. An ordinary failure on SPY produces a
+   recorded outcome for SPY and nothing else; the next symbol is evaluated
+   regardless. No symbol-local failure is allowed to become a day-wide mode.
+   What symbols are *not* independent in is submission: which candidates reach
+   the reviewer, and in what order, is decided by rank across the whole pass,
+   not by position in the universe.
 2. **Nothing accumulates.** A pass leaves behind database rows and log lines
    only. There is no runtime state that a later pass has to reconcile, repair,
-   or be gated on.
+   or be gated on. The one thing a pass carries *within itself* is the buying
+   power its earlier submissions already sent to the venue -- see
+   :func:`_committed_capital` -- and that is derived from the pass's own
+   results, never stored, and gone when the pass ends.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from decimal import Decimal
+from functools import partial
+from typing import TypeVar
 
-from . import tastytrade
+from . import ranking, tastytrade
 from .clock import Clock
 from .config import RunConfig
 from .errors import (
@@ -38,18 +70,26 @@ from .errors import (
     ReviewTimeout,
     SubmissionFailed,
 )
+from .manager import RUN_WIDE, ManagementSummary, Manager
 from .models import (
     SUBMITTED_OUTCOMES,
     ExecutionResult,
+    ManagementAction,
+    ManagementKind,
+    MarketSnapshot,
     NeedsDecision,
     NoTrade,
     Outcome,
+    Portfolio,
     SymbolResult,
     TradeProposal,
 )
 from .ports import Broker, MarketData, Reviewer, Store
+from .ranking import RankedProposal
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +102,10 @@ class PassSummary:
 
     run_id: str
     results: tuple[SymbolResult, ...]
+    #: What phase A did before the scan. Rendered first, because an operator
+    #: reading the summary wants to know about the positions they already
+    #: hold before the ones they might open.
+    management: ManagementSummary
 
     def _count(self, *outcomes: Outcome) -> int:
         wanted = set(outcomes)
@@ -77,6 +121,7 @@ class PassSummary:
 
     @property
     def proposals(self) -> int:
+        """Results carrying a proposal, whether it was reviewed or ranked out."""
         return sum(1 for r in self.results if r.proposal is not None)
 
     @property
@@ -120,6 +165,15 @@ class PassSummary:
         return self._count(Outcome.SUBMISSION_FAILED)
 
     @property
+    def not_selected(self) -> int:
+        """Proposals that ranked below the last free position slot.
+
+        Counted apart from ``no_trade`` because the algorithm *did* find a
+        trade; the pass simply had better ones than it had room for.
+        """
+        return self._count(Outcome.NOT_SELECTED)
+
+    @property
     def awaiting_decision(self) -> int:
         """Trades the system declined to rule on alone, pending a human answer.
 
@@ -143,6 +197,7 @@ class PassSummary:
         find out why nothing traded.
         """
         lines = [
+            self.management.render(),
             f"Scanned: {self.scanned}",
             f"No trade: {self.no_trade}",
             f"Proposals: {self.proposals}",
@@ -155,6 +210,8 @@ class PassSummary:
             f"Rejected by venue: {self.broker_rejected}",
             f"Never sent: {self.never_sent}",
         ]
+        if self.not_selected:
+            lines.append(f"Ranked out: {self.not_selected}")
         if self.awaiting_decision:
             lines.append(f"Awaiting decision: {self.awaiting_decision}")
         if self.ambiguous:
@@ -175,6 +232,7 @@ class Runner:
         broker: Broker,
         store: Store,
         clock: Clock,
+        manager: Manager | None = None,
     ) -> None:
         self._config = config
         self._market_data = market_data
@@ -182,57 +240,125 @@ class Runner:
         self._broker = broker
         self._store = store
         self._clock = clock
+        # Built here by default from the same five dependencies, so a caller
+        # that wires the runner has wired phase A; supplied explicitly when a
+        # test wants to observe or replace it.
+        self._manager = manager or Manager(config, market_data, reviewer, broker, store, clock)
 
     # --- the loop --------------------------------------------------------
 
     def run_once(self) -> PassSummary:
-        """Process every configured symbol exactly once."""
-        run_id = uuid.uuid4().hex
-        verified_account = self._broker.verified_account
-        if verified_account is None:
-            raise BrokerNotConnected(
-                "the broker has not verified an account; refusing to start a pass"
-            )
-        self._store.start_run(
-            run_id=run_id,
-            declared_mode="paper" if self._config.ibkr.paper else "live",
-            verified_account=verified_account,
-            host=self._config.ibkr.host,
-            port=self._config.ibkr.port,
-        )
-        log.info("starting pass %s over %d symbols", run_id, len(self._config.universe))
+        """Scan the universe, rank what qualifies, and trade the best of it.
+
+        Every configured symbol ends the pass with exactly one recorded
+        result. The phases are described in the module docstring.
+        """
+        # --- 0. start ---
+        run_id = self._start_run()
+        universe = self._config.universe
+        log.info("starting pass %s over %d symbols", run_id, len(universe))
+
+        # --- A. manage what is already held ---
+        management = self._manage(run_id)
 
         results: list[SymbolResult] = []
-        for symbol in self._config.universe:
-            try:
-                result = self._process_symbol_safely(symbol)
-            except BaseException as exc:
-                # KeyboardInterrupt is not an Exception, so the isolation
-                # boundary inside _process_symbol_safely cannot catch it. It can
-                # land inside submission, when an order may already be live at
-                # the venue -- and escaping here before _record ran would leave
-                # the pass with no trace of the attempt at all. Record what is
-                # known, then let the signal continue unwinding.
-                log.warning("pass %s interrupted while processing %s", run_id, symbol)
-                self._record(
-                    SymbolResult(
-                        symbol=symbol,
-                        outcome=Outcome.EXECUTION_AMBIGUOUS,
-                        detail=(
-                            f"interrupted during processing: {type(exc).__name__}; "
-                            f"an order for this symbol may be live at the venue"
-                        ),
-                    ),
-                    run_id,
-                )
-                raise
-            self._record(result, run_id)
-            log.info("%-6s %-18s %s", result.symbol, result.outcome.value, result.detail)
-            results.append(result)
 
-        summary = PassSummary(run_id=run_id, results=tuple(results))
-        log.info("pass %s complete\n%s", run_id, summary.render())
-        return summary
+        # --- B. scan and evaluate every symbol; hold the proposals ---
+        #
+        # No interrupt handling here, on purpose. Nothing is sent to the venue
+        # during the scan, so an interrupt can simply unwind; the symbol it
+        # lands on is left without a row, which is the truth about it.
+        candidates: list[TradeProposal] = []
+        for symbol in universe:
+            evaluated = self._isolated(symbol, partial(self._evaluate_symbol, symbol))
+            if isinstance(evaluated, TradeProposal):
+                candidates.append(evaluated)
+            else:
+                results.append(self._conclude(evaluated, run_id))
+
+        # --- C. rank ---
+        ranked = ranking.rank_proposals(candidates)
+        field = len(ranked)
+        log.info("pass %s: %d of %d symbols proposed a trade", run_id, field, len(universe))
+        for candidate in ranked:
+            log.info("candidate %-6s %s", candidate.symbol, candidate.describe(field))
+
+        # --- D. review and submit in rank order, while slots remain ---
+        #
+        # The slot count comes from a portfolio read *after* the scan rather
+        # than from any of the per-symbol reads during it, so it reflects the
+        # book as it stands at the moment the pass starts sending orders.
+        try:
+            portfolio = self._market_data.portfolio()
+        except MarketDataError as exc:
+            for candidate in ranked:
+                results.append(
+                    self._conclude(
+                        SymbolResult(
+                            candidate.symbol,
+                            Outcome.DATA_ERROR,
+                            f"{candidate.describe(field)}; {exc}",
+                        ),
+                        run_id,
+                    )
+                )
+            return self._finish(run_id, results, management)
+
+        held = portfolio.open_symbol_count
+        max_positions = self._config.risk.max_positions
+        slots = max(0, max_positions - held)
+        log.info(
+            "pass %s: %d free position slot(s), %d open of %d",
+            run_id,
+            slots,
+            held,
+            max_positions,
+        )
+
+        for candidate in ranked:
+            # Both figures are re-derived from the results each time rather
+            # than accumulated, so they cannot disagree with what was recorded
+            # (the PassSummary rule).
+            if _orders_submitted(results) >= slots:
+                result = SymbolResult(
+                    candidate.symbol,
+                    Outcome.NOT_SELECTED,
+                    f"{candidate.describe(field)}; "
+                    f"no free position slot ({held} open of {max_positions})",
+                    proposal=candidate.proposal,
+                )
+            else:
+                committed = _committed_capital(results)
+                try:
+                    result = self._isolated(
+                        candidate.symbol,
+                        partial(self._trade_candidate, candidate, field, committed),
+                    )
+                except BaseException as exc:
+                    # KeyboardInterrupt is not an Exception, so the isolation
+                    # boundary cannot catch it. In this phase it can land inside
+                    # submission, when an order may already be live at the
+                    # venue -- and escaping before _record ran would leave the
+                    # pass with no trace of the attempt at all. Record what is
+                    # known, then let the signal continue unwinding.
+                    log.warning(
+                        "pass %s interrupted while processing %s", run_id, candidate.symbol
+                    )
+                    self._record(
+                        SymbolResult(
+                            symbol=candidate.symbol,
+                            outcome=Outcome.EXECUTION_AMBIGUOUS,
+                            detail=(
+                                f"interrupted during processing: {type(exc).__name__}; "
+                                f"an order for this symbol may be live at the venue"
+                            ),
+                        ),
+                        run_id,
+                    )
+                    raise
+            results.append(self._conclude(result, run_id))
+
+        return self._finish(run_id, results, management)
 
     def run_while(
         self,
@@ -258,24 +384,82 @@ class Runner:
                 self._clock.sleep(self._config.scan_interval_seconds)
         return summaries
 
+    def manage_once(self) -> ManagementSummary:
+        """Phase A on its own: work the book without scanning for new trades.
+
+        The same identity gate and run record as a full pass, so every
+        management order is attributable to a verified account.
+        """
+        run_id = self._start_run()
+        log.info("starting management run %s", run_id)
+        management = self._manage(run_id)
+        log.info("management run %s complete\n%s", run_id, management.render())
+        return management
+
+    def _start_run(self) -> str:
+        """Phase 0: refuse without a verified account, then open the run record."""
+        run_id = uuid.uuid4().hex
+        verified_account = self._broker.verified_account
+        if verified_account is None:
+            raise BrokerNotConnected(
+                "the broker has not verified an account; refusing to start a pass"
+            )
+        self._store.start_run(
+            run_id=run_id,
+            declared_mode="paper" if self._config.ibkr.paper else "live",
+            verified_account=verified_account,
+            host=self._config.ibkr.host,
+            port=self._config.ibkr.port,
+        )
+        return run_id
+
+    def _manage(self, run_id: str) -> ManagementSummary:
+        """Phase A, guarded so that it can never stop phase B.
+
+        The manager isolates each spread; what reaches here is a failure
+        *before* any spread could be reached -- the position stream or the
+        open-order stream could not be read. That is one recorded error for
+        the run, not a reason to leave the universe unscanned.
+        """
+        try:
+            return self._manager.run(run_id)
+        except Exception as exc:  # noqa: BLE001 - documented boundary; same policy as _isolated
+            log.exception("management failed before any spread was processed")
+            action = ManagementAction(
+                symbol=RUN_WIDE,
+                kind=ManagementKind.ERROR,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            try:
+                self._store.record_management(action, run_id)
+            except Exception:  # noqa: BLE001 - logged, never silent; see _record
+                log.exception("failed to record the management error for run %s", run_id)
+            return ManagementSummary(run_id=run_id, actions=(action,))
+
+    def _finish(
+        self, run_id: str, results: list[SymbolResult], management: ManagementSummary
+    ) -> PassSummary:
+        summary = PassSummary(run_id=run_id, results=tuple(results), management=management)
+        log.info("pass %s complete\n%s", run_id, summary.render())
+        return summary
+
     # --- one symbol ------------------------------------------------------
 
-    def _process_symbol_safely(self, symbol: str) -> SymbolResult:
-        """Run one symbol inside its isolation boundary.
+    def _isolated(self, symbol: str, step: Callable[[], T]) -> T | SymbolResult:
+        """Run one symbol's step inside its isolation boundary.
 
         The broad ``except Exception`` here is the single deliberate instance in
         the codebase, and it exists to satisfy the requirement that one symbol's
-        unexpected failure must not stop the scan. It is *controlled boundary
+        unexpected failure must not stop the pass. It is *controlled boundary
         handling with an explicit policy*, not a silent failure path: the
         traceback is logged in full and the symbol gets a recorded ``ERROR``
         outcome. It never sets global state and never suppresses the next symbol.
 
-        Expected, typed failures are handled precisely in
-        :meth:`_process_symbol`; anything reaching here is a genuine bug, and it
-        is reported as one.
+        Expected, typed failures are handled precisely inside the step; anything
+        reaching here is a genuine bug, and it is reported as one.
         """
         try:
-            return self._process_symbol(symbol)
+            return step()
         except Exception as exc:  # noqa: BLE001 - documented isolation boundary
             log.exception("unhandled error processing %s", symbol)
             return SymbolResult(
@@ -284,16 +468,73 @@ class Runner:
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
-    def _process_symbol(self, symbol: str) -> SymbolResult:
-        """scan -> evaluate -> review -> submit, for exactly one symbol."""
-        # --- 1. scan ---
+    def _evaluate_symbol(self, symbol: str) -> SymbolResult | TradeProposal:
+        """Phase B: scan -> evaluate, for exactly one symbol.
+
+        A :class:`SymbolResult` is final and goes straight to the record. A
+        :class:`TradeProposal` is a candidate for phase D and is recorded there,
+        under whatever the ranking and the re-quote make of it.
+
+        No committed-capital decrement is applied here: nothing has been
+        submitted yet when the scan runs, so there is nothing to withhold.
+        """
         try:
-            snapshot = self._market_data.snapshot(symbol)
-            portfolio = self._market_data.portfolio()
+            snapshot, portfolio = self._quote(symbol)
         except MarketDataError as exc:
             return SymbolResult(symbol, Outcome.DATA_ERROR, str(exc))
+        return self._decide(symbol, snapshot, portfolio)
 
-        # --- 2. the algorithm decides whether a trade exists ---
+    def _trade_candidate(
+        self, candidate: RankedProposal, field: int, committed: Decimal
+    ) -> SymbolResult:
+        """Phase D: re-quote -> evaluate -> review -> submit, for one candidate.
+
+        The candidate's own proposal is *not* what gets submitted. It was built
+        on the scan's quote, and by the time its turn comes that quote may be
+        minutes old and the book may have moved; so the symbol is quoted and
+        evaluated again, with the capital this pass has already sent withheld,
+        and only a proposal from that fresh evaluation goes to the reviewer.
+
+        Every detail recorded here starts with the candidate's ranking line, so
+        the record says why this symbol was reached before the others.
+
+        Args:
+            candidate: The ranked proposal whose turn it is.
+            field: How many candidates were ranked, for the ``rank i/n`` line.
+            committed: Buying power that earlier submissions in this same pass
+                have already sent to the venue. Subtracted from the account's
+                reported buying power before the algorithm sizes this trade.
+        """
+        symbol = candidate.symbol
+        place = candidate.describe(field)
+        try:
+            snapshot, portfolio = self._quote(symbol)
+        except MarketDataError as exc:
+            return SymbolResult(symbol, Outcome.DATA_ERROR, f"{place}; on re-quote: {exc}")
+
+        portfolio = _withhold_committed(symbol, portfolio, committed)
+        decided = self._decide(symbol, snapshot, portfolio)
+        if isinstance(decided, SymbolResult):
+            return replace(decided, detail=f"{place}; on re-quote: {decided.detail}")
+
+        result = self._review_and_submit(symbol, decided, portfolio)
+        return replace(result, detail=f"{place}; {result.detail}")
+
+    def _quote(self, symbol: str) -> tuple[MarketSnapshot, Portfolio]:
+        """One symbol's market and the account, read together.
+
+        Raises:
+            MarketDataError: from either read; the caller decides what that
+                means for the symbol at the phase it is in.
+        """
+        snapshot = self._market_data.snapshot(symbol)
+        portfolio = self._market_data.portfolio()
+        return snapshot, portfolio
+
+    def _decide(
+        self, symbol: str, snapshot: MarketSnapshot, portfolio: Portfolio
+    ) -> SymbolResult | TradeProposal:
+        """Ask the algorithm; classify everything that is not a proposal."""
         decision = tastytrade.evaluate(
             symbol=symbol,
             snapshot=snapshot,
@@ -316,9 +557,12 @@ class Runner:
                 decision.reason,
                 proposal=decision.proposal,
             )
-        proposal = decision
+        return decision
 
-        # --- 3. exactly one independent review, because a trade now exists ---
+    def _review_and_submit(
+        self, symbol: str, proposal: TradeProposal, portfolio: Portfolio
+    ) -> SymbolResult:
+        """Exactly one independent review, because a trade now exists; then submit."""
         try:
             review = self._reviewer.review(proposal, portfolio)
         except ReviewTimeout as exc:
@@ -331,7 +575,6 @@ class Runner:
                 symbol, Outcome.REVIEW_REJECTED, review.reason, proposal, review
             )
 
-        # --- 4. submit ---
         return self._submit(symbol, proposal, review)
 
     def _submit(self, symbol: str, proposal: TradeProposal, review) -> SymbolResult:
@@ -373,6 +616,12 @@ class Runner:
 
     # --- recording -------------------------------------------------------
 
+    def _conclude(self, result: SymbolResult, run_id: str) -> SymbolResult:
+        """Persist and log one symbol's final result, whichever phase ended it."""
+        self._record(result, run_id)
+        log.info("%-6s %-18s %s", result.symbol, result.outcome.value, result.detail)
+        return result
+
     def _record(self, result: SymbolResult, run_id: str) -> None:
         """Persist one outcome.
 
@@ -390,6 +639,57 @@ class Runner:
                 result.symbol,
                 result.proposal.proposal_id if result.proposal else None,
             )
+
+
+def _orders_submitted(results: Iterable[SymbolResult]) -> int:
+    """Orders this pass has put on the wire so far, by the same test as the summary."""
+    return sum(1 for r in results if r.outcome in SUBMITTED_OUTCOMES)
+
+
+def _committed_capital(results: Iterable[SymbolResult]) -> Decimal:
+    """Buying power the pass has already sent to the venue, from its results.
+
+    Membership in :data:`~ibkr_trader.models.SUBMITTED_OUTCOMES` is the whole
+    test. That set is defined by *arrival* -- ``BROKER_REJECTED`` is in it
+    because the order reached the venue, and ``SUBMISSION_FAILED`` is not
+    because it never left this process -- and the same line is drawn here on
+    purpose. Within a pass this process does not learn what the venue went on
+    to do with an order, so any order that arrived is treated as holding its
+    defined-risk margin (``buying_power_effect``, which for a short vertical is
+    the max loss). The error that produces is sizing the next symbol smaller
+    than strictly necessary, which is the safe direction.
+    """
+    return sum(
+        (
+            r.proposal.buying_power_effect
+            for r in results
+            if r.outcome in SUBMITTED_OUTCOMES and r.proposal is not None
+        ),
+        Decimal(0),
+    )
+
+
+def _withhold_committed(symbol: str, portfolio: Portfolio, committed: Decimal) -> Portfolio:
+    """The account as the algorithm should see it, less what this pass already sent.
+
+    The account's buying power is read fresh per candidate, but the venue has
+    not necessarily debited orders sent seconds ago, so without this every
+    candidate in a pass would be sized against the same free cash. Net
+    liquidation is deliberately left alone: the per-trade risk budget is a
+    fraction of account value, not of what is uncommitted.
+    """
+    if committed <= 0:
+        return portfolio
+    log.debug(
+        "%s: buying power %s less %s committed earlier this pass",
+        symbol,
+        portfolio.buying_power,
+        committed,
+    )
+    return replace(
+        portfolio,
+        buying_power=max(Decimal(0), portfolio.buying_power - committed),
+    )
 
 
 def _format_strike(strike: Decimal) -> str:

@@ -166,6 +166,37 @@ def test_live_port_is_allowed_when_paper_is_explicitly_disabled():
     assert config.ibkr.port == 7496
 
 
+# --- the reviewer backend --------------------------------------------------
+
+
+def test_reviewer_backend_defaults_to_the_claude_code_cli():
+    """No API key by default: the subscription login is the expected path."""
+    config = build_config(minimal())
+    assert config.reviewer.backend == "claude_code"
+    assert config.reviewer.command == "claude"
+
+
+def test_reviewer_backend_accepts_the_api_alternative():
+    config = build_config(minimal(reviewer={"backend": "anthropic_api"}))
+    assert config.reviewer.backend == "anthropic_api"
+
+
+def test_reviewer_backend_rejects_an_unknown_value():
+    """A misspelt backend must not fall through to whichever branch is last."""
+    with pytest.raises(ConfigError) as exc_info:
+        build_config(minimal(reviewer={"backend": "claude-code"}))
+    message = str(exc_info.value)
+    assert "reviewer.backend" in message
+    assert "claude-code" in message
+
+
+def test_reviewer_command_must_not_be_blank():
+    """An empty command would resolve to nothing and fail every review."""
+    with pytest.raises(ConfigError) as exc_info:
+        build_config(minimal(reviewer={"command": ""}))
+    assert "reviewer.command" in str(exc_info.value)
+
+
 # --- the config object is immutable --------------------------------------
 
 

@@ -17,13 +17,13 @@ import contextlib
 import logging
 import sys
 from datetime import time
-from zoneinfo import ZoneInfo
 
 from .broker import IBKRBroker
-from .clock import Clock, SystemClock
-from .config import RunConfig, load_config
+from .clock import MARKET_TZ, Clock, SystemClock
+from .config import ReviewerConfig, RunConfig, load_config
 from .errors import BrokerError, BrokerNotConnected, ConfigError
-from .reviewer import ClaudeReviewer
+from .manager import Manager
+from .reviewer import ClaudeCodeReviewer, ClaudeReviewer
 from .runner import Runner
 from .scanner import IBKRMarketData
 from .store import SqliteStore
@@ -34,7 +34,7 @@ EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_BROKER_ERROR = 3
 
-_EASTERN = ZoneInfo("America/New_York")
+_EASTERN = MARKET_TZ
 _OPEN = time(9, 30)
 _CLOSE = time(16, 0)
 
@@ -71,6 +71,23 @@ def configure_logging(verbose: bool) -> None:
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
+def build_reviewer(
+    config: ReviewerConfig, clock: Clock
+) -> ClaudeCodeReviewer | ClaudeReviewer:
+    """Construct the reviewer the configuration names.
+
+    The backend is a closed Literal on the config, so there is no default
+    branch here: an unknown value was already refused at startup, and a new
+    backend added to the Literal without a case below is a construction-time
+    failure rather than a silently-wrong reviewer.
+    """
+    if config.backend == "claude_code":
+        return ClaudeCodeReviewer(config, clock)
+    if config.backend == "anthropic_api":
+        return ClaudeReviewer(config, clock)
+    raise ConfigError(f"reviewer.backend {config.backend!r} has no implementation")
+
+
 def build_runner(config: RunConfig, clock: Clock) -> tuple[Runner, IBKRBroker, SqliteStore]:
     """Wire the production runner.
 
@@ -94,13 +111,23 @@ def build_runner(config: RunConfig, clock: Clock) -> tuple[Runner, IBKRBroker, S
             ib=broker.client,
         )
         store = SqliteStore(config.database_path, clock=clock)
-        runner = Runner(
+        reviewer = build_reviewer(config.reviewer, clock)
+        manager = Manager(
             config=config,
             market_data=market_data,
-            reviewer=ClaudeReviewer(config.reviewer, clock),
+            reviewer=reviewer,
             broker=broker,
             store=store,
             clock=clock,
+        )
+        runner = Runner(
+            config=config,
+            market_data=market_data,
+            reviewer=reviewer,
+            broker=broker,
+            store=store,
+            clock=clock,
+            manager=manager,
         )
     except BaseException:
         # Includes KeyboardInterrupt: an interrupt during wiring leaks the
@@ -114,12 +141,17 @@ def build_runner(config: RunConfig, clock: Clock) -> tuple[Runner, IBKRBroker, S
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one pass, or repeat until the close."""
+    """Run one pass, repeat until the close, or manage the book alone."""
     parser = argparse.ArgumentParser(prog="ibkr_trader", description=__doc__)
     parser.add_argument(
         "command",
-        choices=("run", "loop"),
-        help="'run' scans the universe once; 'loop' repeats until the close",
+        choices=("run", "loop", "manage"),
+        help=(
+            "'run' manages the open spreads and then scans the universe once; "
+            "'loop' repeats that until the close; 'manage' works the open spreads "
+            "(reconcile fills, rest profit targets, roll or close at manage_dte) "
+            "without scanning for new trades"
+        ),
     )
     parser.add_argument(
         "-c", "--config", default="trader.toml", help="path to the TOML config file"
@@ -149,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "run":
             runner.run_once()
+        elif args.command == "manage":
+            runner.manage_once()
         else:
             runner.run_while(lambda: is_market_open(clock))
     finally:

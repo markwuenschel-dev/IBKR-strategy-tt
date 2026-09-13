@@ -33,8 +33,8 @@ def test_production_runner_places_known_good_order(tmp_path):
 
     summary = runner.run_once()
 
-    # --- the symbol was scanned ---
-    assert market.requested == ["AAPL"]
+    # --- the symbol was scanned, then quoted again before submission ---
+    assert market.requested == ["AAPL", "AAPL"]
 
     # --- exactly one trade was proposed ---
     assert summary.scanned == 1
@@ -88,6 +88,9 @@ def test_production_runner_places_known_good_order(tmp_path):
     assert attempts[0]["symbol"] == "AAPL"
     assert attempts[0]["outcome"] == Outcome.FILLED.value
     assert attempts[0]["proposal_id"] == proposal.proposal_id
+    # A field of one ranks first by definition; the record says so and then what was sent.
+    assert attempts[0]["detail"].startswith("rank 1/1 score 1.00 ")
+    assert attempts[0]["detail"].endswith("; 3x 185/180 put credit spread @ 1.75")
 
     stored_proposals = store.proposals()
     assert len(stored_proposals) == 1

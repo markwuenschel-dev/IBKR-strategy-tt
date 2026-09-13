@@ -126,21 +126,25 @@ def test_fenced_json_is_tolerated():
     assert reviewer.review(proposal, PORTFOLIO).approved is True
 
 
-@pytest.mark.parametrize(
-    "response",
-    [
-        '{"approved": "true", "reason": "ok"}',  # string, not boolean
-        '{"approved": 1, "reason": "ok"}',  # truthy int
-        '{"approved": null, "reason": "ok"}',  # null
-        '{"reason": "ok"}',  # missing field
-        '{"approved": true}',  # missing reason
-        "yes, this trade looks fine to me",  # prose
-        'Sure! Here you go: {"approved": true}',  # prose-wrapped JSON
-        '[{"approved": true, "reason": "ok"}]',  # array, not object
-        "",  # empty
-        "{",  # truncated
-    ],
-)
+#: Every answer that must fail closed, whichever backend carried it.
+#:
+#: Shared with ``test_reviewer_claude_code`` so the CLI backend is held to the
+#: identical list rather than to a copy that could drift shorter.
+MALFORMED_ANSWERS = [
+    '{"approved": "true", "reason": "ok"}',  # string, not boolean
+    '{"approved": 1, "reason": "ok"}',  # truthy int
+    '{"approved": null, "reason": "ok"}',  # null
+    '{"reason": "ok"}',  # missing field
+    '{"approved": true}',  # missing reason
+    "yes, this trade looks fine to me",  # prose
+    'Sure! Here you go: {"approved": true}',  # prose-wrapped JSON
+    '[{"approved": true, "reason": "ok"}]',  # array, not object
+    "",  # empty
+    "{",  # truncated
+]
+
+
+@pytest.mark.parametrize("response", MALFORMED_ANSWERS)
 def test_anything_less_than_an_explicit_boolean_is_a_review_error(response):
     """Every ambiguous answer must fail closed.
 
