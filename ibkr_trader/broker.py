@@ -1,14 +1,19 @@
 """The IBKR order-submission adapter.
 
 This is the only place in the system that speaks TWS. Everything above it sees
-:class:`~ibkr_trader.ports.Broker`: one proposal in, one
-:class:`~ibkr_trader.models.ExecutionResult` out.
+:class:`~ibkr_trader.ports.Broker`: one order in -- a reviewed proposal through
+:meth:`IBKRBroker.submit`, or any :class:`~ibkr_trader.models.ComboOrder`
+through :meth:`IBKRBroker.place` -- and one
+:class:`~ibkr_trader.models.ExecutionResult` out; plus, by reference alone, a
+cancel (:meth:`IBKRBroker.cancel`) and a lookup of what is still working
+(:meth:`IBKRBroker.working_order_refs`).
 
 Two properties of this module matter more than the wire details:
 
-*Durable identity.* ``proposal.proposal_id`` is stamped onto ``order.orderRef``
-before the order is transmitted, so an interrupted submission is reconcilable by
-reference. It is never derived after the fact.
+*Durable identity.* ``ComboOrder.order_ref`` -- the proposal id, for an opening
+order -- is stamped onto ``order.orderRef`` before the order is transmitted, so
+an interrupted submission is reconcilable by reference. It is never derived
+after the fact, and it is the only key the cancel and working-order lookups use.
 
 *Ambiguity is per-order.* When the connection drops mid-transmission we cannot
 tell whether the order reached the venue, so we raise
@@ -40,10 +45,13 @@ from .errors import (
 from .models import (
     CONTRACT_MULTIPLIER,
     Action,
+    ComboLeg,
+    ComboOrder,
     ExecutionResult,
     Fill,
+    OptionLeg,
     Outcome,
-    ProposalLeg,
+    Tif,
     TradeProposal,
 )
 
@@ -52,6 +60,9 @@ logger = logging.getLogger(__name__)
 #: Routing for both the individual option legs and the combo itself.
 _EXCHANGE = "SMART"
 _CURRENCY = "USD"
+
+#: ``ComboOrder.purpose`` of the order a reviewed proposal is transmitted as.
+OPENING_PURPOSE = "OPEN"
 
 #: How long we let a freshly placed order settle before reporting its state.
 #:
@@ -114,6 +125,12 @@ class IBClient(Protocol):
 
     def waitOnUpdate(self, timeout: float = 0) -> bool: ...
 
+    def openTrades(self) -> list[Any]: ...
+
+    def reqAllOpenOrders(self) -> list[Any]: ...
+
+    def cancelOrder(self, order: Any) -> Any: ...
+
 
 class IBApi(Protocol):
     """The ``ib_async`` module surface used to build contracts and orders.
@@ -155,6 +172,38 @@ def _combo_leg_action(leg_action: Action) -> str:
     stated in one place rather than implied by an inline attribute access.
     """
     return leg_action.value
+
+
+def _opening_order(proposal: TradeProposal) -> ComboOrder:
+    """The opening ``ComboOrder`` a reviewed proposal is transmitted as.
+
+    Legs are carried over exactly as the proposal states them, in the same
+    order and with the same actions, because the bag's legs are what a human
+    approved (see the class docstring's sign convention). The reference is the
+    proposal id, so the durable identity stamped on the venue order is the one
+    already in the reviewer record and every persisted row.
+    """
+    return ComboOrder(
+        symbol=proposal.symbol,
+        legs=tuple(
+            ComboLeg(
+                leg=OptionLeg(
+                    symbol=proposal.symbol,
+                    expiry=leg.expiry,
+                    strike=leg.strike,
+                    right=leg.right,
+                ),
+                action=leg.action,
+                ratio=leg.ratio,
+            )
+            for leg in proposal.legs
+        ),
+        quantity=proposal.quantity,
+        limit_price=proposal.limit_price,
+        tif=Tif.DAY,
+        order_ref=proposal.proposal_id,
+        purpose=OPENING_PURPOSE,
+    )
 
 
 def _to_utc(moment: datetime | None, fallback: datetime) -> datetime:
@@ -201,8 +250,9 @@ class IBKRBroker:
     price*, which is IBKR's documented convention for combination orders: a net
     credit is expressed as a negative limit price.
 
-    ``TradeProposal.limit_price`` uses our domain's sign -- positive means
-    premium collected. The price paid to buy the bag is therefore its negation::
+    ``ComboOrder.limit_price`` -- and ``TradeProposal.limit_price``, which an
+    opening order copies -- uses our domain's sign: positive means premium
+    collected. The price paid to buy the bag is therefore its negation::
 
         order:  BUY 1 BAG @ -1.75          (negative limit price = net credit)
         legs:   SELL 185P ratio 1,  BUY 180P ratio 1
@@ -215,6 +265,10 @@ class IBKRBroker:
     opposite of what was approved and relies on TWS mirroring the legs back --
     a double negative that cannot be eyeballed and inverts the whole position if
     that assumption is ever wrong.
+
+    The same encoding closes a spread. A closing order is the mirror of the
+    opening legs at a *debit*: its ``limit_price`` is negative, so the bag is
+    bought at a positive price and the legs again read literally.
 
     Note:
         The leg/side/price encoding is the one part of this adapter that cannot
@@ -400,11 +454,15 @@ class IBKRBroker:
     # -- submission --------------------------------------------------------
 
     def submit(self, proposal: TradeProposal) -> ExecutionResult:
-        """Submit ``proposal`` as one combo order and report what IBKR did.
+        """Submit ``proposal`` as one opening combo order and report what IBKR did.
 
-        The ``orderRef`` stamp happens in :meth:`_build_order`, before
-        ``placeOrder`` is called, so every order that can possibly exist at the
-        venue carries the proposal id.
+        A proposal is the opening case of :meth:`place`: its legs, quantity and
+        limit price become a :class:`~ibkr_trader.models.ComboOrder` with
+        purpose ``OPEN``, a ``DAY`` time in force and ``proposal.proposal_id``
+        as the durable reference (see :func:`_opening_order`). Qualification,
+        the stamp-before-transmit rule and every exception mapping are
+        :meth:`place`'s, so an opening credit and its closing debit go out
+        through one path.
 
         Args:
             proposal: The reviewed, approved trade.
@@ -420,29 +478,52 @@ class IBKRBroker:
             ExecutionAmbiguous: the connection dropped mid-transmission, so
                 arrival can be neither confirmed nor ruled out.
         """
+        return self.place(_opening_order(proposal))
+
+    def place(self, order: ComboOrder) -> ExecutionResult:
+        """Transmit ``order`` as one combo order and report what IBKR did.
+
+        The ``orderRef`` stamp happens in :meth:`_build_order`, before
+        ``placeOrder`` is called, so every order that can possibly exist at the
+        venue carries ``order.order_ref``.
+
+        Args:
+            order: The combo to transmit, in the domain's price convention.
+
+        Returns:
+            An :class:`ExecutionResult` whose ``order_ref`` is always
+            ``order.order_ref``.
+
+        Raises:
+            BrokerNotConnected: no usable session; nothing was sent.
+            SubmissionFailed: the order was definitively not accepted and never
+                reached the venue.
+            ExecutionAmbiguous: the connection dropped mid-transmission, so
+                arrival can be neither confirmed nor ruled out.
+        """
         if not self.is_connected:
             raise BrokerNotConnected(
-                f"not connected to IBKR; proposal {proposal.proposal_id} was not sent"
+                f"not connected to IBKR; order {order.order_ref} was not sent"
             )
         assert self._ib is not None  # narrowed by is_connected
 
-        bag = self._build_combo(proposal)
-        order = self._build_order(proposal)
+        bag = self._build_combo(order)
+        venue_order = self._build_order(order)
 
         try:
-            trade = self._ib.placeOrder(bag, order)
+            trade = self._ib.placeOrder(bag, venue_order)
         except Exception as exc:
             # Distinguish "never left" from "cannot tell". A dead session at
             # this point means the order may or may not have crossed the wire.
             if not self._ib.isConnected():
-                logger.error("connection lost transmitting %s: %s", proposal.proposal_id, exc)
+                logger.error("connection lost transmitting %s: %s", order.order_ref, exc)
                 raise ExecutionAmbiguous(
-                    f"connection lost while transmitting order {proposal.proposal_id}: {exc}",
-                    order_ref=proposal.proposal_id,
+                    f"connection lost while transmitting order {order.order_ref}: {exc}",
+                    order_ref=order.order_ref,
                 ) from exc
-            logger.error("placeOrder rejected %s: %s", proposal.proposal_id, exc)
+            logger.error("placeOrder rejected %s: %s", order.order_ref, exc)
             raise SubmissionFailed(
-                f"IBKR refused order {proposal.proposal_id} before transmission: {exc}"
+                f"IBKR refused order {order.order_ref} before transmission: {exc}"
             ) from exc
 
         # Past this point the order is live at IBKR. Anything that fails while
@@ -450,25 +531,135 @@ class IBKRBroker:
         # generic error: it must carry the order_ref so the runner's isolation
         # boundary can persist the proposal instead of losing every trace of it.
         try:
-            self._settle(trade, proposal)
-            return self._interpret(trade, proposal)
+            self._settle(trade, order)
+            return self._interpret(trade, order)
         except (ExecutionAmbiguous, BrokerNotConnected, SubmissionFailed):
             raise
         except Exception as exc:
             logger.error(
                 "could not read the result of transmitted order %s: %s",
-                proposal.proposal_id,
+                order.order_ref,
                 exc,
             )
             raise ExecutionAmbiguous(
-                f"order {proposal.proposal_id} was transmitted but its result could "
+                f"order {order.order_ref} was transmitted but its result could "
                 f"not be read: {exc}",
-                order_ref=proposal.proposal_id,
+                order_ref=order.order_ref,
             ) from exc
+
+    # -- working orders ----------------------------------------------------
+
+    def cancel(self, order_ref: str) -> bool:
+        """Cancel the working order carrying ``order_ref``.
+
+        Looked up at the venue, never in this process's memory: first among this
+        client's own open trades (``openTrades``), then among every client's
+        (``reqAllOpenOrders``), so a profit target resting since an earlier
+        process can still be pulled after a restart. Only orders for the
+        verified account, and only ones not already in a done state, count as
+        working -- see :meth:`_is_working_for_us`.
+
+        Transmitting the cancel is all this promises. IBKR confirms it
+        asynchronously and can still fill the order first, which is why a
+        ``True`` here is followed by a reconciliation against positions rather
+        than treated as proof the order is gone.
+
+        Returns:
+            True when a working order carried the reference and a cancel was
+            transmitted; False when no working order carries it (filled,
+            cancelled, or never existed). False is not an error.
+
+        Raises:
+            BrokerNotConnected: no usable session; nothing was sent.
+            BrokerError: the open-order stream could not be read, or the
+                cancel could not be transmitted.
+        """
+        ib = self.client
+        trade = self._find_working(ib, order_ref)
+        if trade is None:
+            logger.info("no working order carries ref %s; nothing to cancel", order_ref)
+            return False
+        try:
+            ib.cancelOrder(trade.order)
+        except Exception as exc:
+            logger.error("cancel of %s could not be transmitted: %s", order_ref, exc)
+            raise BrokerError(
+                f"could not transmit a cancel for order {order_ref}: {exc}"
+            ) from exc
+        logger.info("cancel transmitted for order %s", order_ref)
+        return True
+
+    def working_order_refs(self) -> frozenset[str]:
+        """References of every order currently working for the verified account.
+
+        Read through ``reqAllOpenOrders`` -- every client's orders, not only
+        this one's -- because the caller is asking what is resting at the
+        venue, and a restart changes nothing about that. Orders for another
+        account under the same login, orders already in a done state, and
+        orders carrying no reference at all are dropped: the first are not
+        ours, the second are not working, and the third cannot be matched to
+        anything this system placed.
+
+        Raises:
+            BrokerNotConnected: no usable session.
+            BrokerError: the open-order stream could not be read.
+        """
+        ib = self.client
+        refs: set[str] = set()
+        for trade in self._read_open_orders(ib.reqAllOpenOrders, "reqAllOpenOrders"):
+            if not self._is_working_for_us(trade):
+                continue
+            ref = str(getattr(getattr(trade, "order", None), "orderRef", "") or "")
+            if ref:
+                refs.add(ref)
+        return frozenset(refs)
+
+    def _find_working(self, ib: IBClient, order_ref: str) -> Any | None:
+        """The working trade stamped ``order_ref``, or None.
+
+        This client's own trades first because they cost no round trip;
+        ``reqAllOpenOrders`` second because it is the only view that includes
+        an order placed by a process that is no longer running.
+        """
+        sources = (
+            (ib.openTrades, "openTrades"),
+            (ib.reqAllOpenOrders, "reqAllOpenOrders"),
+        )
+        for read, name in sources:
+            for trade in self._read_open_orders(read, name):
+                order = getattr(trade, "order", None)
+                if getattr(order, "orderRef", "") != order_ref:
+                    continue
+                if self._is_working_for_us(trade):
+                    return trade
+        return None
+
+    @staticmethod
+    def _read_open_orders(read: Any, name: str) -> list[Any]:
+        """One open-order stream as a list, or a ``BrokerError`` naming it."""
+        try:
+            return list(read())
+        except Exception as exc:
+            logger.error("could not read open orders via %s: %s", name, exc)
+            raise BrokerError(f"could not read the open-order stream ({name}): {exc}") from exc
+
+    def _is_working_for_us(self, trade: Any) -> bool:
+        """Whether ``trade`` is this account's and not yet in a done state.
+
+        An order carrying no account is admitted, matching the scanner's
+        reading of the same field: a double need not model it, and its absence
+        is not evidence of another book.
+        """
+        order = getattr(trade, "order", None)
+        account = self._verified_account or self._config.account
+        if getattr(order, "account", "") not in ("", account):
+            return False
+        status = str(getattr(getattr(trade, "orderStatus", None), "status", "") or "")
+        return status not in _DONE_STATUSES
 
     # -- contract and order construction -----------------------------------
 
-    def _build_combo(self, proposal: TradeProposal) -> Any:
+    def _build_combo(self, order: ComboOrder) -> Any:
         """Qualify every leg and assemble the ``BAG`` contract.
 
         Qualification is mandatory rather than opportunistic: a ``ComboLeg``
@@ -480,51 +671,51 @@ class IBKRBroker:
                 nothing is transmitted.
         """
         api = self._require_api()
-        options = [self._build_option(api, proposal.symbol, leg) for leg in proposal.legs]
+        options = [self._build_option(api, combo_leg.leg) for combo_leg in order.legs]
         try:
             qualified = self._ib.qualifyContracts(*options)  # type: ignore[union-attr]
         except Exception as exc:
-            logger.error("qualifying legs for %s failed: %s", proposal.proposal_id, exc)
+            logger.error("qualifying legs for %s failed: %s", order.order_ref, exc)
             raise SubmissionFailed(
-                f"cannot qualify option legs for {proposal.symbol} "
-                f"({proposal.proposal_id}): {exc}"
+                f"cannot qualify option legs for {order.symbol} ({order.order_ref}): {exc}"
             ) from exc
 
-        if len(qualified) != len(proposal.legs):
+        if len(qualified) != len(order.legs):
             raise SubmissionFailed(
-                f"IBKR qualified {len(qualified)} of {len(proposal.legs)} legs for "
-                f"{proposal.symbol} ({proposal.proposal_id})"
+                f"IBKR qualified {len(qualified)} of {len(order.legs)} legs for "
+                f"{order.symbol} ({order.order_ref})"
             )
 
         combo_legs = []
-        for leg, contract in zip(proposal.legs, qualified, strict=True):
+        for combo_leg, contract in zip(order.legs, qualified, strict=True):
             con_id = getattr(contract, "conId", 0) if contract is not None else 0
             if not con_id:
+                leg = combo_leg.leg
                 raise SubmissionFailed(
-                    f"IBKR could not resolve {proposal.symbol} {leg.expiry} "
-                    f"{leg.strike} {leg.right.value} ({proposal.proposal_id})"
+                    f"IBKR could not resolve {leg.symbol} {leg.expiry} "
+                    f"{leg.strike} {leg.right.value} ({order.order_ref})"
                 )
             combo_legs.append(
                 api.ComboLeg(
                     conId=int(con_id),
-                    ratio=leg.ratio,
-                    action=_combo_leg_action(leg.action),
+                    ratio=combo_leg.ratio,
+                    action=_combo_leg_action(combo_leg.action),
                     exchange=_EXCHANGE,
                 )
             )
 
         return api.Contract(
             secType="BAG",
-            symbol=proposal.symbol,
+            symbol=order.symbol,
             exchange=_EXCHANGE,
             currency=_CURRENCY,
             comboLegs=combo_legs,
         )
 
-    def _build_option(self, api: IBApi, symbol: str, leg: ProposalLeg) -> Any:
+    def _build_option(self, api: IBApi, leg: OptionLeg) -> Any:
         """One leg as an unqualified ``Option`` contract."""
         return api.Option(
-            symbol=symbol,
+            symbol=leg.symbol,
             lastTradeDateOrContractMonth=leg.expiry.strftime("%Y%m%d"),
             strike=float(leg.strike),
             right=leg.right.value,
@@ -533,27 +724,27 @@ class IBKRBroker:
             multiplier=str(int(CONTRACT_MULTIPLIER)),
         )
 
-    def _build_order(self, proposal: TradeProposal) -> Any:
+    def _build_order(self, order: ComboOrder) -> Any:
         """The limit order for the bag, carrying the durable reference.
 
         ``orderRef`` is set here -- before the caller can transmit -- because
         that is the only stamp that survives a dropped connection.
         """
         api = self._require_api()
-        order = api.LimitOrder(
-            self._combo_action(proposal).value,
-            float(proposal.quantity),
+        venue_order = api.LimitOrder(
+            self._combo_action(order).value,
+            float(order.quantity),
             # Negated: our sign is credit-positive, the wire wants the price
             # *paid* for the bag, so a collected credit is a negative limit.
-            float(-proposal.limit_price),
+            float(-order.limit_price),
         )
-        order.orderRef = proposal.proposal_id
-        order.tif = "DAY"
+        venue_order.orderRef = order.order_ref
+        venue_order.tif = order.tif.value
         if self._config.account:
-            order.account = self._config.account
-        return order
+            venue_order.account = self._config.account
+        return venue_order
 
-    def _combo_action(self, proposal: TradeProposal) -> Action:
+    def _combo_action(self, order: ComboOrder) -> Action:
         """Which side the bag goes out on: always BUY.
 
         Credit versus debit is carried by the sign of the limit price, not by
@@ -569,7 +760,7 @@ class IBKRBroker:
 
     # -- reading the result ------------------------------------------------
 
-    def _settle(self, trade: Any, proposal: TradeProposal) -> None:
+    def _settle(self, trade: Any, order: ComboOrder) -> None:
         """Pump broker events for a bounded window so the status is current.
 
         Bounded by construction: at most :data:`_SETTLE_POLLS` polls, and it
@@ -590,16 +781,16 @@ class IBKRBroker:
             except Exception as exc:
                 logger.error(
                     "event stream failed after transmitting %s: %s",
-                    proposal.proposal_id,
+                    order.order_ref,
                     exc,
                 )
                 raise ExecutionAmbiguous(
                     f"lost the IBKR event stream after transmitting order "
-                    f"{proposal.proposal_id}; its state cannot be established: {exc}",
-                    order_ref=proposal.proposal_id,
+                    f"{order.order_ref}; its state cannot be established: {exc}",
+                    order_ref=order.order_ref,
                 ) from exc
 
-    def _interpret(self, trade: Any, proposal: TradeProposal) -> ExecutionResult:
+    def _interpret(self, trade: Any, order: ComboOrder) -> ExecutionResult:
         """Translate a live ``Trade`` into our terminal vocabulary.
 
         Raises:
@@ -610,36 +801,36 @@ class IBKRBroker:
 
         assert self._ib is not None
         if not self._ib.isConnected() and status not in _DONE_STATUSES:
-            logger.error("connection lost with %s in state %r", proposal.proposal_id, status)
+            logger.error("connection lost with %s in state %r", order.order_ref, status)
             raise ExecutionAmbiguous(
-                f"connection to IBKR lost with order {proposal.proposal_id} in "
+                f"connection to IBKR lost with order {order.order_ref} in "
                 f"state {status or 'unknown'}; arrival cannot be confirmed",
-                order_ref=proposal.proposal_id,
+                order_ref=order.order_ref,
             )
 
         outcome = _STATUS_OUTCOMES.get(status, Outcome.EXECUTION_AMBIGUOUS)
 
         if outcome is Outcome.BROKER_REJECTED:
             message = _rejection_text(trade)
-            logger.warning("IBKR rejected %s: %s", proposal.proposal_id, message)
+            logger.warning("IBKR rejected %s: %s", order.order_ref, message)
         elif outcome is Outcome.FILLED:
             message = f"filled at status {status}"
         elif status in _STATUS_OUTCOMES:
             message = f"IBKR status {status}"
         else:
             message = f"IBKR reported unrecognized status {status!r}; state unresolved"
-            logger.warning("unmapped IBKR status %r for %s", status, proposal.proposal_id)
+            logger.warning("unmapped IBKR status %r for %s", status, order.order_ref)
 
         return ExecutionResult(
             outcome=outcome,
-            order_ref=proposal.proposal_id,
+            order_ref=order.order_ref,
             broker_order_id=self._broker_order_id(trade),
             message=message,
             # Fills are read from whatever the venue reported, not gated on the
             # outcome: a DAY order that partially filled and then cancelled is
             # BROKER_REJECTED and still owns contracts. _build_fills returns ()
             # when nothing actually traded.
-            fills=self._build_fills(trade, proposal),
+            fills=self._build_fills(trade, order),
         )
 
     def _broker_order_id(self, trade: Any) -> str | None:
@@ -651,7 +842,7 @@ class IBKRBroker:
         order_id = getattr(status, "orderId", 0) or getattr(trade.order, "orderId", 0)
         return str(order_id) if order_id else None
 
-    def _build_fills(self, trade: Any, proposal: TradeProposal) -> tuple[Fill, ...]:
+    def _build_fills(self, trade: Any, order: ComboOrder) -> tuple[Fill, ...]:
         """Collapse IBKR's per-leg executions into one package-level fill.
 
         ``Trade.fills`` carries one execution *per leg*, so summing their shares
@@ -661,13 +852,14 @@ class IBKRBroker:
         price come from there while ``Trade.fills`` supplies the real execution
         timestamp.
 
-        The returned price carries the proposal's sign convention: positive for
-        a credit received, negative for a debit paid, matching
-        ``TradeProposal.limit_price``.
+        The returned price carries the order's sign convention: positive for a
+        credit received, negative for a debit paid, matching
+        ``ComboOrder.limit_price`` (and therefore ``TradeProposal.limit_price``
+        for an opening order).
 
         Nothing is fabricated. A quantity or price the venue did not report is
         unknown, not zero, and an unknown fill is no fill: substituting the
-        proposal's own quantity and limit price would write a *request* into the
+        order's own quantity and limit price would write a *request* into the
         durable record as though it were an observed *fact*, with no marker
         saying so. Returns ``()`` whenever the venue has not reported a real
         execution, which is also how a genuinely unfilled order reports.
@@ -687,7 +879,7 @@ class IBKRBroker:
         magnitude = Decimal(str(abs(reported_price)))
         if magnitude == 0:
             return ()
-        price = magnitude if proposal.is_credit else -magnitude
+        price = magnitude if order.is_credit else -magnitude
 
         filled_at = self._clock.now()
         times = [

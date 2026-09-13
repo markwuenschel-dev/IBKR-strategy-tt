@@ -14,9 +14,11 @@ criteria, not operational gates: they resolve to exactly one of two outcomes,
 and never to persisted readiness state. Adding a criterion means adding a check
 here, not adding a state file.
 
-Strategy: short put vertical (put credit spread). Sell a put at the target
-delta, buy a further out-of-the-money put a fixed width below it to define the
-risk, and collect a credit worth a minimum fraction of that width.
+Strategy: short put vertical (put credit spread). Sell a put at the short delta
+target, buy a further out-of-the-money put at the long delta target to define
+the risk, and collect a credit worth a minimum fraction of the resulting width.
+The width is whatever the distance between those two strikes happens to be on
+this chain -- an output of selection, never an input to it.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal
 
+from .clock import market_date
 from .config import RiskConfig, StrategyConfig
 from .models import (
     CONTRACT_MULTIPLIER,
@@ -58,8 +61,13 @@ def _select_expiry(snapshot: MarketSnapshot, strategy: StrategyConfig) -> date |
 
     Ties break toward the nearer expiry, so selection is deterministic for any
     chain rather than dependent on dictionary or exchange ordering.
+
+    "Today" is the US market calendar date, not the UTC date: an expiry is a US
+    date, and for the hours after 8 pm Eastern the UTC date is already tomorrow,
+    which would count every expiry one day short and push a 30-DTE expiry out
+    of a 30-day band that should include it.
     """
-    today = snapshot.as_of.date()
+    today = market_date(snapshot.as_of)
     candidates = [
         (expiry, (expiry - today).days)
         for expiry in snapshot.expiries()
@@ -89,6 +97,31 @@ def _rank_short_puts(
         if strategy.min_short_delta <= abs(put.delta) <= strategy.max_short_delta
     ]
     candidates.sort(key=lambda p: (abs(abs(p.delta) - strategy.short_delta_target), p.strike))
+    return tuple(candidates)
+
+
+def _rank_long_puts(
+    puts: tuple[OptionQuote, ...], short_put: OptionQuote, strategy: StrategyConfig
+) -> tuple[OptionQuote, ...]:
+    """Rank every long-strike candidate for one short put, best first.
+
+    The long put defines the risk, so it must sit strictly below the short
+    strike, and it is chosen by delta rather than by a fixed distance: the
+    spread is as wide as the gap between the two target deltas happens to be
+    on this chain. Ties break toward the *higher* strike -- the narrower
+    spread -- because at equal delta distance the narrower spread risks less
+    per contract for the same short leg.
+
+    Every candidate in the band is returned so that an illiquid best choice
+    can be skipped rather than disqualify the short strike it partners.
+    """
+    candidates = [
+        put
+        for put in puts
+        if put.strike < short_put.strike
+        and strategy.min_long_delta <= abs(put.delta) <= strategy.max_long_delta
+    ]
+    candidates.sort(key=lambda p: (abs(abs(p.delta) - strategy.long_delta_target), -p.strike))
     return tuple(candidates)
 
 
@@ -218,7 +251,7 @@ def evaluate(
     expiry = _select_expiry(snapshot, strategy)
     if expiry is None:
         return NoTrade(f"no expiry between {strategy.min_dte} and {strategy.max_dte} DTE")
-    dte = (expiry - snapshot.as_of.date()).days
+    dte = (expiry - market_date(snapshot.as_of)).days
 
     puts = snapshot.puts_for(expiry)
     if not puts:
@@ -228,7 +261,9 @@ def evaluate(
     #
     # The candidates are tried in preference order rather than committing to the
     # single best delta: a missing partner or an illiquid leg disqualifies that
-    # candidate, not the whole symbol, while tradable alternatives remain.
+    # candidate, not the whole symbol, while tradable alternatives remain. The
+    # same holds one level down -- an illiquid best long put yields to the next
+    # long put in the band before the short strike itself is given up on.
     candidates = _rank_short_puts(puts, strategy)
     if not candidates:
         return NoTrade(
@@ -239,27 +274,34 @@ def evaluate(
     pair: tuple[OptionQuote, OptionQuote] | None = None
     first_failure: str | None = None
     for candidate in candidates:
-        long_strike = candidate.strike - strategy.spread_width
-        partner = next((p for p in puts if p.strike == long_strike), None)
-        if partner is None:
-            first_failure = first_failure or (
-                f"no put at {long_strike} to define a {strategy.spread_width}-wide "
-                f"spread below the {candidate.strike} short strike"
-            )
-            continue
-        failure = _liquidity_failure(candidate, strategy) or _liquidity_failure(
-            partner, strategy
-        )
-        if failure is not None:
-            # The preferred candidate's failure is the one the operator asked about.
-            first_failure = first_failure or failure
-            continue
-        pair = (candidate, partner)
-        break
+        # The short leg is screened before its partners are even ranked: if it
+        # cannot be filled, no choice of long put rescues the spread.
+        failure = _liquidity_failure(candidate, strategy)
+        if failure is None:
+            partners = _rank_long_puts(puts, candidate, strategy)
+            if not partners:
+                failure = (
+                    f"no put below the {candidate.strike} short strike between "
+                    f"{strategy.min_long_delta:.2f} and {strategy.max_long_delta:.2f} "
+                    f"delta to define the spread"
+                )
+            for partner in partners:
+                partner_failure = _liquidity_failure(partner, strategy)
+                if partner_failure is None:
+                    pair = (candidate, partner)
+                    break
+                failure = failure or partner_failure
+        if pair is not None:
+            break
+        # The preferred candidate's failure is the one the operator asked about.
+        first_failure = first_failure or failure
 
     if pair is None:
         return NoTrade(first_failure or "no tradable spread in the delta band")
     short_put, long_put = pair
+    # Derived, never configured: the risk is defined by wherever the long delta
+    # target landed on this chain.
+    width = short_put.strike - long_put.strike
 
     # --- premium must justify the risk ---
     #
@@ -270,11 +312,11 @@ def evaluate(
     raw_credit = short_put.mid - long_put.mid
     if raw_credit <= 0:
         return NoTrade(f"{short_put.strike}/{long_put.strike} put spread offers no net credit")
-    credit_ratio = float(raw_credit / strategy.spread_width)
+    credit_ratio = float(raw_credit / width)
     if credit_ratio < strategy.min_credit_ratio:
         return NoTrade(
             f"credit {_round_credit(raw_credit)} is {credit_ratio:.1%} of the "
-            f"{strategy.spread_width}-wide spread, below the "
+            f"{width:.2f}-wide spread, below the "
             f"{strategy.min_credit_ratio:.1%} minimum"
         )
 
@@ -286,7 +328,7 @@ def evaluate(
         )
 
     # --- defined risk and sizing ---
-    max_loss_per_contract = (strategy.spread_width - credit) * CONTRACT_MULTIPLIER
+    max_loss_per_contract = (width - credit) * CONTRACT_MULTIPLIER
     quantity, binding = _position_size(max_loss_per_contract, portfolio, risk)
     if quantity < 1:
         return NoTrade(_sizing_refusal(binding, max_loss_per_contract, portfolio, risk))
@@ -333,10 +375,17 @@ def evaluate(
             f"{abs(short_put.delta):.2f} within "
             f"[{strategy.min_short_delta:.2f}, {strategy.max_short_delta:.2f}]"
         ),
+        "long_delta": (
+            f"{abs(long_put.delta):.2f} within "
+            f"[{strategy.min_long_delta:.2f}, {strategy.max_long_delta:.2f}], "
+            f"target {strategy.long_delta_target:.2f}"
+        ),
         "credit_ratio": (
             f"{credit_ratio:.1%} of width >= {strategy.min_credit_ratio:.1%} minimum"
         ),
-        "spread_width": str(strategy.spread_width),
+        # Derived from the two selected strikes, so the reviewer and the stored
+        # record still see the width the risk arithmetic actually used.
+        "spread_width": f"{width:.2f}",
         "liquidity": (
             f"short spread {short_put.spread_pct:.1%} / OI {short_put.open_interest}; "
             f"long spread {long_put.spread_pct:.1%} / OI {long_put.open_interest}"

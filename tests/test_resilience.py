@@ -82,7 +82,8 @@ def test_reviewer_rejection_blocks_submission_and_is_recorded(tmp_path):
     result = summary.results[0]
 
     assert result.outcome is Outcome.REVIEW_REJECTED
-    assert result.detail == "spread width exceeds preference"
+    # The detail leads with the candidate's ranking line, then the reviewer's words.
+    assert result.detail.endswith("; spread width exceeds preference")
     assert reviewer.call_count == 1
     assert broker.call_count == 0, "a rejected proposal must never be submitted"
 
@@ -153,9 +154,10 @@ def test_broker_rejection_records_exact_message_and_continues(tmp_path):
         Outcome.BROKER_REJECTED,
         Outcome.BROKER_REJECTED,
     ]
-    assert summary.results[0].detail == rejection
+    assert summary.results[0].detail.endswith(f"; {rejection}")
 
     orders = store.orders()
+    # The venue's text is stored on the order row exactly, without the ranking prefix.
     assert len(orders) == 2
     assert orders[0]["message"] == rejection
     assert orders[0]["outcome"] == Outcome.BROKER_REJECTED.value

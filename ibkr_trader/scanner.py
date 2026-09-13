@@ -8,12 +8,17 @@ prices and finished quotes.
 
 Four properties are load-bearing:
 
-*Nothing survives the call.* There is no cache, no background subscription, no
+*No quote survives the call.* There is no background subscription, no
 reconnection daemon and no module-level state. Every market-data line this
-adapter opens is closed before :meth:`IBKRMarketData.snapshot` returns, so a
-pass leaves the connection exactly as it found it. A stale quote that outlives
+adapter opens is closed before :meth:`IBKRMarketData.snapshot` -- or
+:meth:`IBKRMarketData.quote`, the management path's per-leg equivalent --
+returns, so a pass leaves the connection exactly as it found it. A stale quote that outlives
 the pass that fetched it is worse than no quote at all — it would price a real
-order off a market that no longer exists.
+order off a market that no longer exists. The one thing that does survive is
+the *IV rank*, a derived number rather than a quote, held per process and per
+market date (see :meth:`IBKRMarketData._iv_rank`): the one-year history it is
+computed from cannot change within a trading day, and re-requesting it for
+every symbol on every pass is what would trip IBKR's historical-data pacing.
 
 *The line budget is enforced here or nowhere.* An IBKR account holds a finite
 number of simultaneous market-data lines (``ibkr.refresh_limit``, ceilinged by
@@ -51,10 +56,19 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
-from .clock import Clock
+from .clock import Clock, market_date
 from .config import IBKRConfig, StrategyConfig
 from .errors import MarketDataError
-from .models import MarketSnapshot, OptionQuote, Portfolio, Position, Right
+from .models import (
+    CONTRACT_MULTIPLIER,
+    MarketSnapshot,
+    OptionLeg,
+    OptionPosition,
+    OptionQuote,
+    Portfolio,
+    Position,
+    Right,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +104,11 @@ QUOTE_POLL_SECONDS = 0.25
 
 #: Strike window above spot, as a fraction of the underlying price.
 #:
-#: The strategy sells puts at 0.20-0.40 delta and buys a fixed width below, so
-#: strikes far from spot can never be selected. Quoting them would consume the
-#: line budget to produce rows the algorithm discards. Asymmetric because the
-#: chain is puts-only: the useful strikes sit below spot.
+#: The strategy sells puts at 0.20-0.40 delta and buys a further strike below,
+#: so strikes far from spot can never be selected. Quoting them would consume
+#: the line budget to produce rows the algorithm discards. Asymmetric because
+#: the chain is puts-only: the useful strikes sit below spot. The window
+#: *below* spot is not a constant: see :meth:`IBKRMarketData._strike_window`.
 #:
 #: Zero, because a put at or above spot is in the money with a delta past 0.50
 #: and can never reach the 0.20-0.40 short band -- so every line spent above
@@ -101,6 +116,10 @@ QUOTE_POLL_SECONDS = 0.25
 #: waste this window exists to prevent. Spot itself stays inside the window so
 #: an at-the-money listed strike is still quoted.
 STRIKE_WINDOW_ABOVE = 0.0
+
+#: Denominator that turns a calendar DTE into the fraction of a year an
+#: annualized volatility is scaled by: ``iv * sqrt(dte / DAYS_PER_YEAR)``.
+DAYS_PER_YEAR = 365.0
 
 #: Lookback used for IV rank, and the realized-volatility window of the proxy.
 IV_HISTORY_DURATION = "1 Y"
@@ -305,6 +324,9 @@ class IBKRMarketData:
         self._clock = clock
         self._ib = ib
         self._api = api
+        #: Successful IV-rank results, keyed by ``(symbol, market date)``. See
+        #: :meth:`_iv_rank` for why this exists and what it deliberately omits.
+        self._iv_rank_cache: dict[tuple[str, date], tuple[float, float]] = {}
 
     # ------------------------------------------------------------------
     # MarketData protocol
@@ -342,9 +364,13 @@ class IBKRMarketData:
         underlying = self._qualified_underlying(ib, symbol)
         underlying_ticker = self._quote_underlying(ib, underlying)
         underlying_price = self._underlying_price(symbol, underlying_ticker)
+        # Generic tick 106 on the underlying (UNDERLYING_GENERIC_TICKS) lands
+        # in ``Ticker.impliedVolatility``. It sizes the strike window only; the
+        # rank below is measured against history, not this reading.
+        underlying_iv = _finite(getattr(underlying_ticker, "impliedVolatility", None))
 
         contracts, trading_class = self._chain_contracts(
-            ib, symbol, underlying, underlying_price, as_of
+            ib, symbol, underlying, underlying_price, as_of, underlying_iv
         )
         chain = self._quote_chain(ib, symbol, contracts)
         if not chain:
@@ -353,7 +379,7 @@ class IBKRMarketData:
                 f"(all missing a bid/ask)"
             )
 
-        implied_volatility, iv_rank = self._iv_rank(ib, symbol, underlying)
+        implied_volatility, iv_rank = self._iv_rank(ib, symbol, underlying, as_of)
 
         logger.info(
             "%s snapshot: price=%s quotes=%d expiries=%d iv=%.4f iv_rank=%.1f",
@@ -470,6 +496,216 @@ class IBKRMarketData:
             pending_orders_known=pending_known,
         )
 
+    def option_positions(self) -> tuple[OptionPosition, ...]:
+        """Every option contract the account holds, one row per contract.
+
+        The per-leg view :meth:`portfolio` deliberately collapses to underlying
+        symbols. Read from the same position stream, filtered to
+        ``secType == "OPT"``; stock and everything else is not a leg and is
+        skipped, not reported.
+
+        ``average_cost`` is ``Position.avgCost`` **exactly as the venue sends
+        it**, unscaled: ``ib_async`` stores the wire value without arithmetic
+        (``decoder.py`` ``updatePortfolio``/``position`` pass ``float(avgCost)``
+        straight through), and IBKR reports an option's average cost per
+        *contract* -- the per-share price, commission included, already
+        multiplied by the contract multiplier -- so a 1.75 put shows as
+        roughly 175.0. Nothing here derives from it; it is carried so a
+        record can say what the venue said.
+
+        A held option that cannot be identified -- no parsable expiry, strike
+        or right -- is an error, not a skipped row. The caller uses this list to
+        decide whether a spread's legs are still there, and silently dropping
+        a leg it cannot name would read as "the position closed".
+
+        Raises:
+            MarketDataError: the position stream could not be read, a row
+                belongs to another account, or a held option cannot be
+                identified.
+        """
+        ib = self._client()
+        account = self._ibkr_config.account
+
+        try:
+            raw_positions = list(ib.positions(account))
+        except Exception as exc:
+            logger.exception("Failed to read positions for account %r", account)
+            raise MarketDataError(f"Cannot read IBKR positions: {exc}") from exc
+
+        self._require_one_account(raw_positions, account, "position")
+
+        held: list[OptionPosition] = []
+        for raw in raw_positions:
+            contract = getattr(raw, "contract", None)
+            if str(getattr(contract, "secType", "") or "") != "OPT":
+                continue
+            reported = _finite(getattr(raw, "position", None))
+            quantity = int(reported) if reported is not None else 0
+            if quantity == 0:
+                continue
+            average_cost = _finite(getattr(raw, "avgCost", None))
+            held.append(
+                OptionPosition(
+                    leg=self._held_leg(contract),
+                    quantity=quantity,
+                    average_cost=(
+                        _price(average_cost) if average_cost is not None else Decimal(0)
+                    ),
+                )
+            )
+        logger.debug("Option positions: %d contracts held", len(held))
+        return tuple(held)
+
+    def quote(self, legs: Sequence[OptionLeg]) -> tuple[OptionQuote, ...]:
+        """Current market for exactly these contracts, in the same order.
+
+        The management path: a spread under management is usually outside the
+        entry DTE band, so :meth:`snapshot` never quotes its legs. Each leg is
+        built as an ``Option`` on SMART/USD with the standard multiplier,
+        qualified in one batch, and quoted through the same line-budgeted
+        machinery as the chain (:meth:`_quote_batches`), so every line is
+        released before this returns exactly as it is for a snapshot.
+
+        A leg the venue quotes one-sided or not at all is still returned, as a
+        dead book -- bid 0, ask 0, so ``spread_pct`` is infinite -- rather than
+        dropped or raised. The caller decides what an unquotable leg means; a
+        missing entry would silently change the *length* of an answer the
+        caller zips against its own legs.
+
+        Raises:
+            MarketDataError: a leg could not be qualified (named in the
+                message), or the market-data request itself failed.
+        """
+        wanted = tuple(legs)
+        if not wanted:
+            return ()
+        ib = self._client()
+        api = self._require_api()
+
+        contracts = [self._leg_contract(api, leg) for leg in wanted]
+        resolved = self._qualify_legs(ib, wanted, contracts)
+        self._apply_market_data_type(ib)
+        tickers = self._quote_batches(ib, resolved, OPTION_GENERIC_TICKS)
+        if len(tickers) != len(wanted):
+            raise MarketDataError(
+                f"IBKR returned {len(tickers)} tickers for {len(wanted)} legs; "
+                f"cannot match quotes to legs"
+            )
+        return tuple(
+            self._leg_quote(leg, ticker) for leg, ticker in zip(wanted, tickers, strict=True)
+        )
+
+    @staticmethod
+    def _describe_leg(leg: OptionLeg) -> str:
+        """One leg as an operator would write it: ``AAPL 2026-03-20 185 P``."""
+        return f"{leg.symbol} {leg.expiry.isoformat()} {leg.strike} {leg.right.value}"
+
+    @classmethod
+    def _held_leg(cls, contract: Any) -> OptionLeg:
+        """The identity of a held option, from the venue's contract fields.
+
+        ``lastTradeDateOrContractMonth`` is ``YYYYMMDD`` on a position row;
+        ``right`` is ``P``/``C`` but is read by its first letter so the long
+        forms ``ib_async`` also accepts (``PUT``/``CALL``) resolve the same way.
+
+        Raises:
+            MarketDataError: any of symbol, expiry, strike or right is missing
+                or unparsable.
+        """
+        symbol = str(getattr(contract, "symbol", "") or "")
+        raw_expiry = getattr(contract, "lastTradeDateOrContractMonth", "") or ""
+        expiry = _parse_expiry(str(raw_expiry))
+        strike = _finite(getattr(contract, "strike", None))
+        raw_right = str(getattr(contract, "right", "") or "").upper()[:1]
+        right = {Right.PUT.value: Right.PUT, Right.CALL.value: Right.CALL}.get(raw_right)
+        if not symbol or expiry is None or strike is None or strike <= 0 or right is None:
+            raise MarketDataError(
+                f"IBKR reported an option position that cannot be identified: "
+                f"{getattr(contract, 'localSymbol', '') or contract!r}"
+            )
+        return OptionLeg(symbol=symbol, expiry=expiry, strike=_price(strike), right=right)
+
+    @staticmethod
+    def _leg_contract(api: MarketDataApi, leg: OptionLeg) -> Any:
+        """One leg as an unqualified ``Option``, routed as the broker routes it.
+
+        No ``tradingClass``, matching ``broker._build_option``: a management
+        order is placed against the contract the broker resolves, so the quote
+        must describe that same contract.
+        """
+        return api.Option(
+            leg.symbol,
+            leg.expiry.strftime("%Y%m%d"),
+            float(leg.strike),
+            leg.right.value,
+            EXCHANGE,
+            currency=CURRENCY,
+            multiplier=str(int(CONTRACT_MULTIPLIER)),
+        )
+
+    def _qualify_legs(
+        self, ib: Any, legs: Sequence[OptionLeg], contracts: Sequence[Any]
+    ) -> list[Any]:
+        """Resolve every leg's contract, or name the leg that would not resolve.
+
+        Unlike :meth:`_qualify` this is all-or-nothing: the chain is a grid
+        whose misses are expected, but a leg here is a contract the account
+        holds or held, and one that will not resolve is a fact the caller must
+        hear about, not a row to drop.
+
+        ``qualifyContracts`` answers positionally -- a slot is ``None`` for a
+        contract it could not resolve -- and stamps the resolved ones in place.
+        A double that returns fewer objects than it was given is read the same
+        way: whichever contract carries no ``conId`` afterwards is unresolved.
+        """
+        try:
+            answered = list(ib.qualifyContracts(*contracts))
+        except Exception as exc:
+            named = ", ".join(self._describe_leg(leg) for leg in legs)
+            logger.exception("Failed to qualify option legs %s", named)
+            raise MarketDataError(f"cannot qualify option legs {named}: {exc}") from exc
+
+        positional = answered if len(answered) == len(contracts) else [None] * len(contracts)
+        resolved: list[Any] = []
+        for leg, contract, answer in zip(legs, contracts, positional, strict=True):
+            answered_ok = answer is not None and getattr(answer, "conId", 0)
+            candidate = answer if answered_ok else contract
+            if not getattr(candidate, "conId", 0):
+                raise MarketDataError(
+                    f"IBKR did not resolve option leg {self._describe_leg(leg)} on "
+                    f"{EXCHANGE}/{CURRENCY}"
+                )
+            resolved.append(candidate)
+        return resolved
+
+    def _leg_quote(self, leg: OptionLeg, ticker: Any) -> OptionQuote:
+        """One leg's ``OptionQuote``, carrying the leg's own identity.
+
+        Identity comes from ``leg``, never from the ticker's contract: the
+        caller asked about this contract and must get an answer keyed exactly
+        as it asked. Market fields are read the way :meth:`_build_quote` reads
+        them; a book with no usable two sides is reported as bid 0 / ask 0.
+        """
+        market = self._two_sided(ticker)
+        if market is None:
+            logger.debug(
+                "%s: no usable bid/ask; reporting a dead book", self._describe_leg(leg)
+            )
+            bid = ask = Decimal(0)
+        else:
+            bid, ask = market
+        return OptionQuote(
+            symbol=leg.symbol,
+            expiry=leg.expiry,
+            strike=leg.strike,
+            right=leg.right,
+            bid=bid,
+            ask=ask,
+            delta=self._delta(ticker),
+            open_interest=self._open_interest(ticker, leg.right),
+            volume=_count(getattr(ticker, "volume", None)),
+        )
+
     # ------------------------------------------------------------------
     # Underlying
     # ------------------------------------------------------------------
@@ -526,12 +762,13 @@ class IBKRMarketData:
         position.
 
         **Scope, stated exactly.** ``openTrades()`` reports the orders of *this
-        client*. Nothing in this package calls ``reqAllOpenOrders`` or the
-        master-client mechanism, and ``ibkr.client_id`` defaults to 1 rather
-        than 0, so an order entered by hand in TWS or placed by another process
-        is not seen here. That is a real gap in the concentration check, stated
-        rather than papered over -- an earlier version of this docstring claimed
-        the opposite.
+        client*. This reader does not call ``reqAllOpenOrders`` (the broker's
+        ``working_order_refs`` does, for management, but its answer is not
+        consulted here) or the master-client mechanism, and ``ibkr.client_id``
+        defaults to 1 rather than 0, so an order entered by hand in TWS or
+        placed by another process is not seen by the concentration check. That
+        is a real gap, stated rather than papered over -- an earlier version of
+        this docstring claimed the opposite.
 
         **On failure the caller is told, not defaulted.** Reporting "no working
         orders" for a read that failed is indistinguishable from a genuinely
@@ -705,6 +942,7 @@ class IBKRMarketData:
         underlying: Any,
         underlying_price: Decimal,
         as_of: datetime,
+        implied_volatility: float | None,
     ) -> tuple[list[Any], str]:
         """Build the narrowed list of option contracts worth quoting.
 
@@ -714,6 +952,10 @@ class IBKRMarketData:
         strike window around spot, it is tens. Filtering *before* requesting
         quotes is the whole point — a post-filter would still have paid for
         every line.
+
+        ``implied_volatility`` is the underlying's current IV from its own
+        ticker, or None when IBKR did not send one; it widens the strike window
+        on a volatile name (see :meth:`_strike_window`) and nothing else.
 
         The selected chain's trading class is returned alongside the contracts
         rather than discarded. This is the only place that knows which
@@ -741,7 +983,11 @@ class IBKRMarketData:
         if chain is None:
             raise MarketDataError(f"{symbol}: IBKR returned no option chain definition")
 
-        today = as_of.date()
+        # The market date, not ``as_of.date()``: ``as_of`` is UTC, and after
+        # 8 pm Eastern the UTC date is already tomorrow. Counting DTE from it
+        # would drop an expiry sitting exactly on ``min_dte`` and admit one a
+        # day past ``max_dte``.
+        today = market_date(as_of)
         expiries = self._expiries_in_band(chain, today)
         if not expiries:
             raise MarketDataError(
@@ -749,10 +995,11 @@ class IBKRMarketData:
                 f"and {self._strategy_config.max_dte} DTE"
             )
 
-        strikes = self._strikes_near(chain, underlying_price)
+        window = self._strike_window(symbol, implied_volatility)
+        strikes = self._strikes_near(chain, underlying_price, window)
         if not strikes:
             raise MarketDataError(
-                f"{symbol}: no listed strike within the window around {underlying_price}"
+                f"{symbol}: no listed strike within {window:.1%} below {underlying_price}"
             )
 
         trading_class = getattr(chain, "tradingClass", "") or symbol
@@ -836,16 +1083,86 @@ class IBKRMarketData:
                 selected.append(expiry)
         return sorted(selected)
 
-    def _strikes_near(self, chain: Any, underlying_price: Decimal) -> list[float]:
-        """Listed strikes inside the window around spot, ascending.
+    def _strike_window(self, symbol: str, implied_volatility: float | None) -> float:
+        """How far below spot to look for strikes, as a fraction of spot.
 
-        The window must be wide enough below spot to hold both legs: the short
-        strike sits at 0.20-0.40 delta and the long strike a further
-        ``spread_width`` below it.
+        The window must reach the long strike: the short strike sits at
+        0.20-0.40 delta and the long strike a further strike below it. Where
+        the 0.20-delta put sits depends on the underlying's volatility, so a
+        fixed percentage is either too narrow for a volatile name -- the whole
+        band lands below the window and the symbol reports "no listed strike"
+        -- or wastefully wide for a calm one, spending qualification round
+        trips on rows the algorithm discards.
+
+        So the window is the larger of two numbers::
+
+            max(strike_window_pct,
+                strike_window_iv_multiple * iv * sqrt(max_dte / 365))
+
+        The second term is ``strike_window_iv_multiple`` standard deviations of
+        the underlying's move over the *longest* admissible expiry, using the
+        IV IBKR reports on the underlying's own ticker. It is a sizing
+        heuristic, not a delta model: ``sqrt(max_dte / 365)`` scales an
+        annualized volatility to the horizon, and the multiple is the operator's
+        margin. A multiple of 0 disables the term and the floor stands alone.
+
+        A missing, non-finite or non-positive IV is not an error here. The
+        reading is a convenience for narrowing, and the floor is a complete
+        answer on its own; the symbol is still scanned, and the fallback is
+        logged so an unexpectedly narrow window can be traced to its cause.
+        Every input and the chosen window go to the DEBUG log for the same
+        reason: a run's strike selection must be auditable from its log alone.
+        """
+        strategy = self._strategy_config
+        floor = strategy.strike_window_pct
+        multiple = strategy.strike_window_iv_multiple
+        horizon = math.sqrt(strategy.max_dte / DAYS_PER_YEAR)
+
+        if multiple <= 0:
+            logger.debug(
+                "%s: strike window %.4f (floor; iv scaling disabled, multiple=%s)",
+                symbol,
+                floor,
+                multiple,
+            )
+            return floor
+
+        if implied_volatility is None or implied_volatility <= 0:
+            logger.debug(
+                "%s: strike window %.4f (floor; underlying iv unavailable: %r)",
+                symbol,
+                floor,
+                implied_volatility,
+            )
+            return floor
+
+        scaled = multiple * implied_volatility * horizon
+        window = max(floor, scaled)
+        logger.debug(
+            "%s: strike window %.4f (%s; floor=%.4f multiple=%.2f iv=%.4f "
+            "max_dte=%d horizon=%.4f scaled=%.4f)",
+            symbol,
+            window,
+            "iv-scaled" if scaled > floor else "floor",
+            floor,
+            multiple,
+            implied_volatility,
+            strategy.max_dte,
+            horizon,
+            scaled,
+        )
+        return window
+
+    def _strikes_near(
+        self, chain: Any, underlying_price: Decimal, window: float
+    ) -> list[float]:
+        """Listed strikes inside ``[spot * (1 - window), spot]``, ascending.
+
+        ``window`` comes from :meth:`_strike_window`; the upper bound is spot
+        itself (:data:`STRIKE_WINDOW_ABOVE`).
         """
         spot = float(underlying_price)
-        window = self._strategy_config.strike_window_pct
-        low = spot * (1.0 - window) - float(self._strategy_config.spread_width)
+        low = spot * (1.0 - window)
         high = spot * (1.0 + STRIKE_WINDOW_ABOVE)
         selected = {
             value
@@ -1002,7 +1319,9 @@ class IBKRMarketData:
             and _finite(getattr(ticker, "ask", None)) is not None
         )
 
-    def _build_quote(self, symbol: str, ticker: Any) -> OptionQuote | None:
+    def _build_quote(
+        self, symbol: str, ticker: Any, right: Right = Right.PUT
+    ) -> OptionQuote | None:
         """Turn one option ticker into an ``OptionQuote``, or None if unusable.
 
         A missing bid or ask makes the row unusable: every downstream screen
@@ -1014,43 +1333,87 @@ class IBKRMarketData:
         constrained ``> 0``, so a 0.0-delta quote can never be selected as the
         short strike, while still remaining available as the long leg (which is
         chosen by strike, not by delta).
+
+        ``right`` is what the ticker was requested as; the chain only ever asks
+        for puts, so it defaults to that. The identity fields come from the
+        ticker's contract, which is what :meth:`_leg_quote` deliberately does
+        not do -- see there.
         """
         contract = getattr(ticker, "contract", None)
         if contract is None:
             return None
         expiry = _parse_expiry(str(getattr(contract, "lastTradeDateOrContractMonth", "")))
         strike = _finite(getattr(contract, "strike", None))
-        bid = _finite(getattr(ticker, "bid", None))
-        ask = _finite(getattr(ticker, "ask", None))
-        if expiry is None or strike is None or bid is None or ask is None:
+        market = self._two_sided(ticker)
+        if expiry is None or strike is None or market is None:
             return None
-        if bid < 0 or ask <= 0 or ask < bid:
-            return None
-
-        greeks = getattr(ticker, "modelGreeks", None) or getattr(ticker, "lastGreeks", None)
-        delta = _finite(getattr(greeks, "delta", None)) if greeks else None
+        bid, ask = market
 
         return OptionQuote(
             symbol=symbol,
             expiry=expiry,
             strike=_price(strike),
-            right=Right.PUT,
-            bid=_price(bid),
-            ask=_price(ask),
-            delta=delta if delta is not None else 0.0,
-            open_interest=_count(getattr(ticker, "putOpenInterest", None)),
+            right=right,
+            bid=bid,
+            ask=ask,
+            delta=self._delta(ticker),
+            open_interest=self._open_interest(ticker, right),
             volume=_count(getattr(ticker, "volume", None)),
         )
+
+    @staticmethod
+    def _two_sided(ticker: Any) -> tuple[Decimal, Decimal] | None:
+        """The ticker's bid and ask as exact prices, or None if not a usable book.
+
+        Both sides must be finite, the ask positive, the bid non-negative and
+        not above the ask. Anything else is one-sided, crossed or unsent, and
+        no midpoint computed from it can be filled.
+        """
+        bid = _finite(getattr(ticker, "bid", None))
+        ask = _finite(getattr(ticker, "ask", None))
+        if bid is None or ask is None:
+            return None
+        if bid < 0 or ask <= 0 or ask < bid:
+            return None
+        return _price(bid), _price(ask)
+
+    @staticmethod
+    def _delta(ticker: Any) -> float:
+        """Model delta, falling back to last-computed greeks, then to 0.0."""
+        greeks = getattr(ticker, "modelGreeks", None) or getattr(ticker, "lastGreeks", None)
+        delta = _finite(getattr(greeks, "delta", None)) if greeks else None
+        return delta if delta is not None else 0.0
+
+    @staticmethod
+    def _open_interest(ticker: Any, right: Right) -> int:
+        """Open interest for the side the contract is on (generic tick 101)."""
+        field = "putOpenInterest" if right is Right.PUT else "callOpenInterest"
+        return _count(getattr(ticker, field, None))
 
     # ------------------------------------------------------------------
     # Volatility
     # ------------------------------------------------------------------
 
-    def _iv_rank(self, ib: Any, symbol: str, underlying: Any) -> tuple[float, float]:
-        """Compute current implied volatility and its rank over a one-year lookback.
+    def _iv_rank(
+        self, ib: Any, symbol: str, underlying: Any, as_of: datetime
+    ) -> tuple[float, float]:
+        """Current implied volatility and its rank over a one-year lookback.
 
         Two methods, tried in order, both of them real measurements — this never
         returns a placeholder or a hardcoded constant.
+
+        **Cached per symbol and market date.** Both methods spend a
+        ``reqHistoricalData`` request, and IBKR paces historical data at
+        roughly 60 requests per 10 minutes. A 102-name universe scanned every
+        30 minutes would exceed that on every pass, and the answer cannot change
+        between passes anyway: the series is daily bars, so within one market
+        date (:func:`~ibkr_trader.clock.market_date` of ``as_of``) a second
+        request returns the same numbers. A hit therefore skips the request
+        entirely. Only a *successful* result is cached -- a failure is raised,
+        not remembered, so the next pass tries again rather than repeating a
+        transient error all day. The cache lives on this instance and dies with
+        the process: ``run`` (one pass) never sees a hit, ``loop`` does from its
+        second pass onward.
 
         **Primary: true IV rank.** One year of daily bars with
         ``whatToShow='OPTION_IMPLIED_VOLATILITY'`` gives IBKR's own daily
@@ -1091,6 +1454,24 @@ class IBKRMarketData:
                 of richness there is no trade to evaluate, so this fails rather
                 than defaulting.
         """
+        key = (symbol, market_date(as_of))
+        cached = self._iv_rank_cache.get(key)
+        if cached is not None:
+            logger.debug(
+                "%s: iv rank %.1f (iv=%.4f) reused from cache for market date %s",
+                symbol,
+                cached[1],
+                cached[0],
+                key[1],
+            )
+            return cached
+
+        result = self._compute_iv_rank(ib, symbol, underlying)
+        self._iv_rank_cache[key] = result
+        return result
+
+    def _compute_iv_rank(self, ib: Any, symbol: str, underlying: Any) -> tuple[float, float]:
+        """The uncached body of :meth:`_iv_rank`: one or two history requests."""
         try:
             iv_series = self._historical_closes(ib, underlying, "OPTION_IMPLIED_VOLATILITY")
             rank = _percentile_rank(iv_series[-1], iv_series) if iv_series else None

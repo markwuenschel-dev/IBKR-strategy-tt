@@ -20,13 +20,21 @@ translation has an owner.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from .models import (
+    ComboOrder,
     ExecutionResult,
+    ManagementAction,
     MarketSnapshot,
+    OpeningOrder,
+    OptionLeg,
+    OptionPosition,
+    OptionQuote,
     Portfolio,
     ReviewDecision,
+    Spread,
     SymbolResult,
     TradeProposal,
 )
@@ -41,6 +49,32 @@ class MarketData(Protocol):
 
         Raises:
             MarketDataError: quote or chain data is unavailable or unusable.
+        """
+        ...
+
+    def option_positions(self) -> tuple[OptionPosition, ...]:
+        """Every option contract the account holds, one row per contract.
+
+        The per-leg view :meth:`portfolio` deliberately collapses. The manager
+        needs it to recognise which held legs make up which spread, and to
+        notice when a spread's legs are gone.
+
+        Raises:
+            MarketDataError: the position stream could not be read.
+        """
+        ...
+
+    def quote(self, legs: Sequence[OptionLeg]) -> tuple[OptionQuote, ...]:
+        """Current market for exactly these contracts, in the same order.
+
+        A spread under management is usually outside the entry DTE band, so
+        :meth:`snapshot` never quotes its legs; this does. A leg with no usable
+        bid/ask is still returned, with the same dead-book figures the
+        snapshot would carry, so the caller decides what an unquotable leg
+        means.
+
+        Raises:
+            MarketDataError: a leg could not be qualified or quoted at all.
         """
         ...
 
@@ -121,6 +155,48 @@ class Broker(Protocol):
         """
         ...
 
+    def place(self, order: ComboOrder) -> ExecutionResult:
+        """Transmit a combo order and report what the venue did with it.
+
+        :meth:`submit` is this for an opening proposal; management orders
+        (profit target, close, roll halves) come through here. Same stamping
+        rule: ``order.order_ref`` is on the venue order before transmission.
+
+        Raises:
+            BrokerNotConnected: the connection is unusable; nothing was sent.
+            SubmissionFailed: the order was definitively not accepted and never
+                reached the venue.
+            ExecutionAmbiguous: the connection dropped mid-transmission.
+        """
+        ...
+
+    def cancel(self, order_ref: str) -> bool:
+        """Cancel the working order carrying ``order_ref``.
+
+        Returns True when a working order with that reference was found and a
+        cancel was transmitted; False when no such order is working (already
+        filled, already cancelled, or never existed). A False is not an error:
+        the caller reconciles against positions to learn which it was.
+
+        Raises:
+            BrokerNotConnected: the connection is unusable; nothing was sent.
+            BrokerError: the open-order stream could not be read, or the cancel
+                could not be transmitted.
+        """
+        ...
+
+    def working_order_refs(self) -> frozenset[str]:
+        """References of every order currently working for the account.
+
+        Read from the venue, not from this process's memory, so a profit
+        target placed by an earlier process is still seen after a restart.
+
+        Raises:
+            BrokerNotConnected: the connection is unusable.
+            BrokerError: the open-order stream could not be read.
+        """
+        ...
+
     def connect(self) -> None:
         """Establish the session. Called once, before any submission.
 
@@ -185,6 +261,35 @@ class Store(Protocol):
                 rather than left silent because ``runner.py`` guards this call
                 with a blanket handler, and a reader of the contract alone could
                 not tell that it needed to.
+        """
+        ...
+
+    def record_spread(self, spread: Spread) -> None:
+        """Insert or replace the durable row for one spread, keyed by id.
+
+        Raises:
+            Exception: storage failures propagate unchanged.
+        """
+        ...
+
+    def live_spreads(self) -> tuple[Spread, ...]:
+        """Every spread whose status is in ``LIVE_SPREAD_STATUSES``."""
+        ...
+
+    def unreconciled_openings(self) -> tuple[OpeningOrder, ...]:
+        """Opening orders that reached the venue and have no spread row yet.
+
+        An order is "reached the venue" when its recorded outcome is in
+        ``SUBMITTED_OUTCOMES`` other than ``BROKER_REJECTED``.
+        """
+        ...
+
+    def record_management(self, action: ManagementAction, run_id: str) -> None:
+        """Persist one management step.
+
+        Raises:
+            Exception: storage failures propagate unchanged; the manager guards
+                the call the way the runner guards :meth:`record`.
         """
         ...
 

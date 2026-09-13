@@ -8,8 +8,22 @@ deterministically and never skip or flake near midnight.
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
+from zoneinfo import ZoneInfo
+
+#: The calendar every option expiry, DTE count and session boundary is stated
+#: in. Instants stay in UTC; only the *date* is ever read in this zone, because
+#: an expiry is a US calendar date and a UTC date is one day ahead of it for
+#: the four hours after 8 pm Eastern.
+MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def market_date(instant: datetime) -> date:
+    """The US market calendar date of a timezone-aware instant."""
+    if instant.tzinfo is None:
+        raise ValueError("market_date requires a timezone-aware instant")
+    return instant.astimezone(MARKET_TZ).date()
 
 
 class Clock(Protocol):

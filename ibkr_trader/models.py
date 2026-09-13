@@ -43,9 +43,15 @@ class Outcome(str, Enum):
 
     This is the *entire* state vocabulary of the system. There is no global
     state machine; each symbol independently ends in exactly one of these.
+
+    ``NOT_SELECTED`` is the one outcome decided across symbols rather than
+    within one: the algorithm proposed a trade, but candidates ranked above it
+    took every free position slot this pass. It was neither reviewed nor
+    submitted, and it is not a ``NO_TRADE`` -- the trade existed.
     """
 
     NO_TRADE = "NO_TRADE"
+    NOT_SELECTED = "NOT_SELECTED"
     DATA_ERROR = "DATA_ERROR"
     REVIEW_REJECTED = "REVIEW_REJECTED"
     REVIEW_TIMEOUT = "REVIEW_TIMEOUT"
@@ -364,6 +370,202 @@ class ExecutionResult:
     def filled_quantity(self) -> int:
         """Total contracts filled."""
         return sum(f.quantity for f in self.fills)
+
+
+# --- management: what the engine holds and how it works it ------------------
+
+
+class Tif(str, Enum):
+    """Time in force. ``GTC`` is used only by the resting profit-target order."""
+
+    DAY = "DAY"
+    GTC = "GTC"
+
+
+@dataclass(frozen=True, slots=True)
+class OptionLeg:
+    """Identity of one listed option contract, independent of any quote."""
+
+    symbol: str
+    expiry: date
+    strike: Decimal
+    right: Right
+
+
+@dataclass(frozen=True, slots=True)
+class OptionPosition:
+    """One option contract the account holds, as the venue reports it.
+
+    ``quantity`` is signed: negative is short. ``average_cost`` is per contract
+    in account currency as the venue reports it, and may be zero when the venue
+    does not supply one; nothing here is derived from it.
+    """
+
+    leg: OptionLeg
+    quantity: int
+    average_cost: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True)
+class ComboLeg:
+    """One leg of a combo order: which contract, and which way."""
+
+    leg: OptionLeg
+    action: Action
+    ratio: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ComboOrder:
+    """A multi-leg order to place, in the same price convention as a proposal.
+
+    ``limit_price`` is per spread, per share: positive is a credit received,
+    negative is a debit paid. The broker encodes it for the venue exactly as it
+    does a proposal's price (a ``BUY`` of the bag at the negated figure), so an
+    opening credit spread and its closing debit order go through one path.
+
+    ``order_ref`` is stamped on the venue order before transmission, so any
+    order that can exist at the venue can be found again by reference.
+    ``purpose`` names why the order exists (``OPEN``, ``PROFIT_TARGET``,
+    ``CLOSE``, ``ROLL_CLOSE``, ``ROLL_OPEN``); it is recorded, never branched on
+    by the broker.
+    """
+
+    symbol: str
+    legs: tuple[ComboLeg, ...]
+    quantity: int
+    limit_price: Decimal
+    tif: Tif
+    order_ref: str
+    purpose: str
+
+    @property
+    def is_credit(self) -> bool:
+        return self.limit_price > 0
+
+
+class SpreadStatus(str, Enum):
+    """Lifecycle of one spread the engine opened.
+
+    OPEN: filled, no closing order resting yet.
+    PROFIT_ORDER_RESTING: a GTC buy-back at the profit target is working.
+    CLOSING: a closing order was sent (profit target abandoned or unavailable).
+    ROLLING: the closing half of a roll was sent; the opening half follows once
+        the legs are gone.
+    CLOSED: the legs are no longer held.
+    NEEDS_DECISION: the engine declines to act alone; a human must rule.
+    """
+
+    OPEN = "OPEN"
+    PROFIT_ORDER_RESTING = "PROFIT_ORDER_RESTING"
+    CLOSING = "CLOSING"
+    ROLLING = "ROLLING"
+    CLOSED = "CLOSED"
+    NEEDS_DECISION = "NEEDS_DECISION"
+
+
+#: Statuses under which the spread still occupies the book.
+LIVE_SPREAD_STATUSES = frozenset(
+    {
+        SpreadStatus.OPEN,
+        SpreadStatus.PROFIT_ORDER_RESTING,
+        SpreadStatus.CLOSING,
+        SpreadStatus.ROLLING,
+        SpreadStatus.NEEDS_DECISION,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Spread:
+    """A short put vertical the engine opened and is responsible for.
+
+    ``spread_id`` is the opening proposal's id, so the record of why the trade
+    was made and the record of how it was managed share one key.
+    ``open_credit`` is per spread, per share (a ``1.75`` credit), taken from
+    the fill when the venue reported one and from the order's limit otherwise.
+    """
+
+    spread_id: str
+    symbol: str
+    expiry: date
+    short_strike: Decimal
+    long_strike: Decimal
+    quantity: int
+    open_credit: Decimal
+    opened_at: datetime
+    status: SpreadStatus
+    profit_order_ref: str | None = None
+    closing_order_ref: str | None = None
+    closed_at: datetime | None = None
+    close_price: Decimal | None = None
+    close_reason: str = ""
+
+    @property
+    def width(self) -> Decimal:
+        return self.short_strike - self.long_strike
+
+    @property
+    def short_leg(self) -> OptionLeg:
+        return OptionLeg(self.symbol, self.expiry, self.short_strike, Right.PUT)
+
+    @property
+    def long_leg(self) -> OptionLeg:
+        return OptionLeg(self.symbol, self.expiry, self.long_strike, Right.PUT)
+
+    @property
+    def max_profit(self) -> Decimal:
+        return self.open_credit * CONTRACT_MULTIPLIER * Decimal(self.quantity)
+
+
+@dataclass(frozen=True, slots=True)
+class OpeningOrder:
+    """What the store knows about an opening order that reached the venue.
+
+    The manager reconciles these against the account's option positions to
+    discover fills the submission window did not see. ``fill_price`` is the
+    average fill per spread when fills were recorded, else ``None``.
+    """
+
+    proposal_id: str
+    symbol: str
+    expiry: date
+    short_strike: Decimal
+    long_strike: Decimal
+    quantity: int
+    limit_price: Decimal
+    filled_quantity: int
+    fill_price: Decimal | None
+    recorded_at: datetime
+
+
+class ManagementKind(str, Enum):
+    """Every distinct thing the manager can do or observe, one per record."""
+
+    RECONCILED_FILL = "RECONCILED_FILL"
+    PROFIT_TARGET_PLACED = "PROFIT_TARGET_PLACED"
+    PROFIT_TARGET_FILLED = "PROFIT_TARGET_FILLED"
+    PROFIT_TARGET_CANCELLED = "PROFIT_TARGET_CANCELLED"
+    ROLL_CLOSE = "ROLL_CLOSE"
+    ROLL_OPEN = "ROLL_OPEN"
+    ROLL_DECLINED = "ROLL_DECLINED"
+    CLOSE = "CLOSE"
+    CLOSED = "CLOSED"
+    UNMANAGED_POSITION = "UNMANAGED_POSITION"
+    NEEDS_DECISION = "NEEDS_DECISION"
+    ERROR = "ERROR"
+
+
+@dataclass(frozen=True, slots=True)
+class ManagementAction:
+    """One recorded management step for one spread (or one stray position)."""
+
+    symbol: str
+    kind: ManagementKind
+    detail: str
+    spread_id: str | None = None
+    order: ComboOrder | None = None
+    execution: ExecutionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

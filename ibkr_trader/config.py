@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -127,19 +126,32 @@ class StrategyConfig(_Base):
     min_short_delta: float = Field(default=0.20, gt=0.0, lt=1.0)
     max_short_delta: float = Field(default=0.40, gt=0.0, lt=1.0)
 
-    #: Width of the vertical, in strike points.
-    spread_width: Decimal = Field(default=Decimal(5), gt=0)
+    #: Long-strike delta target and acceptable band (absolute value).
+    #:
+    #: The long put is chosen by delta, not by a fixed width: the spread is as
+    #: wide as the distance between the 0.30-delta and 0.20-delta strikes
+    #: happens to be. Width is therefore an output of selection, never an
+    #: input, and the credit-to-width test below is applied to whatever width
+    #: results.
+    long_delta_target: float = Field(default=0.20, gt=0.0, lt=1.0)
+    min_long_delta: float = Field(default=0.10, gt=0.0, lt=1.0)
+    max_long_delta: float = Field(default=0.25, gt=0.0, lt=1.0)
 
     #: Minimum credit as a fraction of spread width (classic Tastytrade: 1/3).
     min_credit_ratio: float = Field(default=1.0 / 3.0, gt=0.0, lt=1.0)
 
-    #: How far below spot to look for strikes, as a fraction of spot.
+    #: Floor on how far below spot to look for strikes, as a fraction of spot.
     #:
-    #: Must cover the short strike (0.20-0.40 delta, typically 3-10% OTM) plus
-    #: the long strike a further ``spread_width`` below it. Widen it for
-    #: high-volatility underlyings, whose target delta sits further out; every
-    #: extra percent costs contract-qualification round trips on every scan.
+    #: The window must reach the long strike, and on a high-volatility
+    #: underlying the 0.20-delta put sits well beyond 15% OTM. The scanner
+    #: therefore widens this floor to ``strike_window_iv_multiple`` standard
+    #: deviations over the longest admissible expiry, using the underlying's
+    #: current implied volatility:
+    #: ``max(strike_window_pct, multiple * iv * sqrt(max_dte / 365))``.
+    #: Every extra percent costs contract-qualification round trips per scan.
     strike_window_pct: float = Field(default=0.15, gt=0.0, le=1.0)
+    #: Set to 0 to disable the volatility scaling and use the floor alone.
+    strike_window_iv_multiple: float = Field(default=1.2, ge=0.0, le=5.0)
 
     #: Liquidity screens applied to every leg.
     max_spread_pct: float = Field(default=0.10, gt=0.0, le=1.0)
@@ -168,6 +180,24 @@ class StrategyConfig(_Base):
                 f"short_delta_target ({self.short_delta_target}) must lie within "
                 f"[{self.min_short_delta}, {self.max_short_delta}]"
             )
+        if self.min_long_delta > self.max_long_delta:
+            raise ValueError(
+                f"min_long_delta ({self.min_long_delta}) must not exceed "
+                f"max_long_delta ({self.max_long_delta})"
+            )
+        if not self.min_long_delta <= self.long_delta_target <= self.max_long_delta:
+            raise ValueError(
+                f"long_delta_target ({self.long_delta_target}) must lie within "
+                f"[{self.min_long_delta}, {self.max_long_delta}]"
+            )
+        # The long put defines risk below the short put, so it must be the
+        # further-out-of-the-money leg. Equal targets would select the same
+        # strike for both legs: a spread of zero width and zero credit.
+        if self.long_delta_target >= self.short_delta_target:
+            raise ValueError(
+                f"long_delta_target ({self.long_delta_target}) must be below "
+                f"short_delta_target ({self.short_delta_target})"
+            )
         return self
 
 
@@ -194,12 +224,45 @@ class ReviewerConfig(_Base):
     lease. The reviewer is invoked per proposal and has no lifecycle.
     """
 
+    #: Which transport carries the review.
+    #:
+    #: ``claude_code`` runs the Claude Code CLI as a subprocess, billed to the
+    #: subscription ``claude`` is logged in as; no API key is read or needed.
+    #: ``anthropic_api`` calls the API directly and requires
+    #: ``ANTHROPIC_API_KEY``. A Literal rather than a free string so a typo is a
+    #: startup error, not a silent fall-through to whichever branch is last.
+    backend: Literal["claude_code", "anthropic_api"] = "claude_code"
+    #: The CLI executable for the ``claude_code`` backend, resolved on PATH at
+    #: each review. Ignored by ``anthropic_api``.
+    command: str = Field(default="claude", min_length=1)
     model: str = "claude-sonnet-5"
     timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    # Output ceiling for the ``anthropic_api`` backend only; the CLI owns its
+    # own budget and never sees this value.
+    #
     # Thinking tokens are output tokens on an adaptive-thinking model, and the
     # JSON verdict has to fit in the same budget. 1024 risked truncating every
     # review -- a permanent all-reviews-fail mode, not an occasional one.
     max_tokens: int = Field(default=8192, ge=64, le=32768)
+
+
+class ManagementConfig(_Base):
+    """How an open spread is worked after the fill.
+
+    Tastytrade mechanics: take profit at half the credit, and at 21 days to
+    expiration stop passively holding -- roll for a credit if one exists,
+    otherwise close. Nothing here ever adds contracts or widens a spread.
+    """
+
+    #: Buy the spread back when its value falls to this fraction of the credit.
+    profit_target_ratio: float = Field(default=0.5, gt=0.0, lt=1.0)
+
+    #: Days to expiration at or below which a spread is managed, not held.
+    manage_dte: int = Field(default=21, ge=0, le=365)
+
+    #: Attempt a roll to the next cycle at ``manage_dte``. When False, or when
+    #: no roll is available for a net credit, the spread is closed instead.
+    roll: bool = True
 
 
 class RunConfig(_Base):
@@ -212,12 +275,24 @@ class RunConfig(_Base):
     strategy: StrategyConfig = StrategyConfig()
     risk: RiskConfig = RiskConfig()
     reviewer: ReviewerConfig = ReviewerConfig()
+    management: ManagementConfig = ManagementConfig()
 
     #: Where the durable record lives.
     database_path: Path = Path("ibkr_trader.sqlite3")
 
     #: Seconds between passes when running continuously. Ignored for a single pass.
     scan_interval_seconds: float = Field(default=300.0, gt=0, le=86_400)
+
+    @model_validator(mode="after")
+    def _management_precedes_entry(self) -> RunConfig:
+        """A spread must be entered strictly before it becomes manageable."""
+        if self.management.manage_dte >= self.strategy.min_dte:
+            raise ValueError(
+                f"management.manage_dte ({self.management.manage_dte}) must be below "
+                f"strategy.min_dte ({self.strategy.min_dte}); otherwise a spread would "
+                f"be managed on the day it was opened"
+            )
+        return self
 
     @model_validator(mode="after")
     def _universe_is_clean(self) -> RunConfig:

@@ -10,15 +10,19 @@ Each double records what it was asked to do, so tests can assert on *absence*
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import (
+    ComboOrder,
     ExecutionResult,
     Fill,
     MarketSnapshot,
+    OptionLeg,
+    OptionPosition,
     OptionQuote,
     Outcome,
     Portfolio,
@@ -76,6 +80,11 @@ class StubMarketData:
         portfolio: Portfolio | None = None,
         working_orders: dict[str, int] | None = None,
         pending_orders_known: bool = True,
+        requotes: dict[str, MarketSnapshot] | None = None,
+        option_positions: Sequence[OptionPosition] = (),
+        option_positions_per_call: Sequence[Sequence[OptionPosition]] | None = None,
+        option_positions_error: Exception | None = None,
+        quotes: dict[OptionLeg, OptionQuote] | None = None,
     ) -> None:
         self._snapshots = snapshots or {}
         self._failures = failures or {}
@@ -84,14 +93,38 @@ class StubMarketData:
         )
         self._working_orders = dict(working_orders or {})
         self._pending_orders_known = pending_orders_known
+        self._requotes = requotes or {}
+        self._option_positions = tuple(option_positions)
+        self._option_positions_per_call = (
+            [tuple(p) for p in option_positions_per_call]
+            if option_positions_per_call is not None
+            else None
+        )
+        self._option_positions_error = option_positions_error
+        self._quotes = dict(quotes or {})
+        #: Every symbol asked for, in order, repeats included. The runner quotes
+        #: a symbol once during the scan and again before submitting it, so a
+        #: test can read which symbols reached submission from this alone.
         self.requested: list[str] = []
+        #: How many times the position stream was read.
+        self.position_reads = 0
+        #: Every leg list the manager asked to quote, in order.
+        self.quoted: list[tuple[OptionLeg, ...]] = []
 
     def snapshot(self, symbol: str) -> MarketSnapshot:
+        """Serve the configured snapshot; from the second request, the re-quote.
+
+        ``requotes`` lets a test make the market move between the scan and the
+        submission: the first request for a symbol gets its ``snapshots``
+        entry, every later request its ``requotes`` entry when one exists.
+        """
         self.requested.append(symbol)
         if symbol in self._failures:
             raise self._failures[symbol]
         if symbol not in self._snapshots:
             raise MarketDataError(f"no market data configured for {symbol}")
+        if symbol in self._requotes and self.requested.count(symbol) > 1:
+            return self._requotes[symbol]
         return self._snapshots[symbol]
 
     def portfolio(self) -> Portfolio:
@@ -115,6 +148,26 @@ class StubMarketData:
             for symbol, quantity in self._working_orders.items()
         )
         return replace(base, positions=base.positions + pending)
+
+    def option_positions(self) -> tuple[OptionPosition, ...]:
+        """The scripted held legs: per call when scripted so, else the same each time."""
+        self.position_reads += 1
+        if self._option_positions_error is not None:
+            raise self._option_positions_error
+        if self._option_positions_per_call is not None:
+            index = min(self.position_reads - 1, len(self._option_positions_per_call) - 1)
+            return self._option_positions_per_call[index]
+        return self._option_positions
+
+    def quote(self, legs: Sequence[OptionLeg]) -> tuple[OptionQuote, ...]:
+        """Scripted per leg. An unscripted leg raises, so no test passes by accident."""
+        self.quoted.append(tuple(legs))
+        quotes = []
+        for leg in legs:
+            if leg not in self._quotes:
+                raise MarketDataError(f"no quote configured for {leg}")
+            quotes.append(self._quotes[leg])
+        return tuple(quotes)
 
 
 class StubReviewer:
@@ -167,13 +220,33 @@ class FakeBroker:
         error: Exception | None = None,
         connected: bool = True,
         verified_account: str | None = "DU1234567",
+        place_outcome: Outcome = Outcome.FILLED,
+        place_outcomes: dict[str, Outcome | Exception] | None = None,
+        cancel_result: bool = True,
+        cancel_results: dict[str, bool] | None = None,
+        working_refs: Iterable[str] = (),
     ) -> None:
         self._outcome = outcome
         self._message = message
         self._error = error
         self._connected = connected
         self._verified_account = verified_account
+        self._place_outcome = place_outcome
+        #: Scripted per order: keyed by ``order_ref`` first, then by ``purpose``.
+        #: A profit target rests by default -- a GTC buy-back at half the
+        #: credit does not fill the moment it is sent -- and everything else
+        #: fills at its limit, the way a DAY order at the mid usually does.
+        self._place_outcomes = {"PROFIT_TARGET": Outcome.WORKING, **(place_outcomes or {})}
+        self._cancel_result = cancel_result
+        self._cancel_results = dict(cancel_results or {})
+        #: What ``working_order_refs`` reports. Mutable, so a test can move an
+        #: order between passes the way the venue would.
+        self.working_refs: set[str] = set(working_refs)
         self.submitted: list[TradeProposal] = []
+        #: Every combo order placed, in order.
+        self.placed: list[ComboOrder] = []
+        #: Every reference a cancel was asked for, in order.
+        self.cancelled: list[str] = []
         self.connect_calls = 0
         self.disconnect_calls = 0
 
@@ -222,14 +295,51 @@ class FakeBroker:
             fills=fills,
         )
 
+    def place(self, order: ComboOrder) -> ExecutionResult:
+        """Fill at the limit by default; per-ref or per-purpose scripting overrides.
+
+        The one built-in exception is ``PROFIT_TARGET``, which reports
+        ``WORKING`` unless a test scripts otherwise (see ``__init__``).
+        """
+        self.placed.append(order)
+        scripted = self._place_outcomes.get(
+            order.order_ref, self._place_outcomes.get(order.purpose)
+        )
+        if isinstance(scripted, BaseException):
+            raise scripted
+        outcome = scripted if scripted is not None else self._place_outcome
+        fills: tuple[Fill, ...] = ()
+        if outcome is Outcome.FILLED:
+            fills = (
+                Fill(
+                    quantity=order.quantity,
+                    price=order.limit_price,
+                    filled_at=datetime(2026, 1, 15, 14, 32, tzinfo=UTC),
+                ),
+            )
+        return ExecutionResult(
+            outcome=outcome,
+            order_ref=order.order_ref,
+            broker_order_id=f"fake-combo-{len(self.placed)}",
+            fills=fills,
+        )
+
+    def cancel(self, order_ref: str) -> bool:
+        self.cancelled.append(order_ref)
+        return self._cancel_results.get(order_ref, self._cancel_result)
+
+    def working_order_refs(self) -> frozenset[str]:
+        return frozenset(self.working_refs)
+
 
 # --- Chain fixtures -------------------------------------------------------
 #
 # One canonical tradable snapshot, built so exactly one spread qualifies. The
 # numbers are chosen to make the expected order arithmetic checkable by hand:
 #
-#   short 185 put  mid 3.40   (bid 3.35 / ask 3.45,  delta -0.30)
-#   long  180 put  mid 1.65   (bid 1.60 / ask 1.70,  delta -0.20)
+#   short 185 put  mid 3.40   (bid 3.35 / ask 3.45,  delta -0.30 = the target)
+#   long  180 put  mid 1.65   (bid 1.60 / ask 1.70,  delta -0.20 = the target)
+#   width          185 - 180 = 5, derived from the two deltas, not configured
 #   net credit     1.75  =  0.35 x 5-wide, clearing the 1/3 minimum
 #   max loss/ct    (5.00 - 1.75) x 100 = 325
 #   sizing         2% of 50,000 = 1,000 budget -> floor(1000/325) = 3 contracts
@@ -250,11 +360,13 @@ EXPECTED_QUANTITY = 3
 
 
 def _put_ladder(symbol: str, expiry: date) -> list[OptionQuote]:
-    """A put ladder whose 185/180 pair is the only qualifying vertical.
+    """A put ladder whose 185/180 pair is the vertical the algorithm must pick.
 
-    Deltas fall as strikes fall, mimicking a real chain. Only the 185 strike sits
-    in the 0.20-0.40 short-delta band with a partner 5 points below it that also
-    passes the liquidity screen.
+    Deltas fall as strikes fall, mimicking a real chain. 185 is the exact
+    0.30-delta short target; below it, 180 is the exact 0.20-delta long target
+    and 175 (0.13) is the only other strike in the 0.10-0.25 long band, so the
+    long leg lands on 180 and the spread comes out 5 wide. Every leg passes the
+    liquidity screen, so a refusal on this chain is never a liquidity artefact.
     """
     ladder = [
         # strike, bid,    ask,    delta

@@ -37,13 +37,17 @@ from ibkr_trader.broker import IBKRBroker
 from ibkr_trader.clock import FixedClock
 from ibkr_trader.config import build_config
 from ibkr_trader.models import (
+    ComboOrder,
     ExecutionResult,
+    ManagementAction,
     NoTrade,
+    OpeningOrder,
     Portfolio,
+    Spread,
     SymbolResult,
     TradeProposal,
 )
-from ibkr_trader.reviewer import ClaudeReviewer
+from ibkr_trader.reviewer import ClaudeCodeReviewer, ClaudeReviewer
 from ibkr_trader.scanner import IBKRMarketData
 from ibkr_trader.store import SqliteStore
 
@@ -129,6 +133,7 @@ def production_adapters(tmp_path) -> list[tuple[type, Any]]:
             ),
         ),
         (ports.Reviewer, ClaudeReviewer(config.reviewer, clock, client=object())),
+        (ports.Reviewer, ClaudeCodeReviewer(config.reviewer, clock, run=object())),
         (ports.Broker, IBKRBroker(config.ibkr, clock)),
         (ports.Store, SqliteStore(tmp_path / "conformance.sqlite3", clock=clock)),
     ]
@@ -213,7 +218,19 @@ def test_the_structural_check_rejects_a_missing_member():
     """Negative fixture. A store that cannot be closed is not a Store."""
 
     class UncloseableStore:
+        def start_run(
+            self,
+            run_id: str,
+            declared_mode: str,
+            verified_account: str,
+            host: str,
+            port: int,
+        ) -> None: ...
         def record(self, result: SymbolResult, run_id: str) -> None: ...
+        def record_spread(self, spread: Spread) -> None: ...
+        def live_spreads(self) -> tuple[Spread, ...]: ...
+        def unreconciled_openings(self) -> tuple[OpeningOrder, ...]: ...
+        def record_management(self, action: ManagementAction, run_id: str) -> None: ...
 
     assert not isinstance(UncloseableStore(), ports.Store)
 
@@ -247,6 +264,10 @@ def test_the_signature_check_rejects_a_dropped_parameter():
             port: int,
         ) -> None: ...
         def record(self, result: SymbolResult) -> None: ...
+        def record_spread(self, spread: Spread) -> None: ...
+        def live_spreads(self) -> tuple[Spread, ...]: ...
+        def unreconciled_openings(self) -> tuple[OpeningOrder, ...]: ...
+        def record_management(self, action: ManagementAction, run_id: str) -> None: ...
         def close(self) -> None: ...
 
     assert isinstance(UntypedStore(), ports.Store), "structural check should pass here"
@@ -397,6 +418,22 @@ def test_every_port_member_the_composition_root_calls_is_declared():
     assert set(protocol_members(ports.Store)) >= {"record", "close"}
 
 
+def test_every_port_member_the_manager_calls_is_declared():
+    """The manager is the second consumer of the ports, and it widened them.
+
+    Every member ``manager.py`` reaches for must be on a Protocol, or a double
+    could conform while the manager fails at runtime on the first spread.
+    """
+    assert set(protocol_members(ports.MarketData)) >= {"option_positions", "quote"}
+    assert set(protocol_members(ports.Broker)) >= {"place", "cancel", "working_order_refs"}
+    assert set(protocol_members(ports.Store)) >= {
+        "record_spread",
+        "live_spreads",
+        "unreconciled_openings",
+        "record_management",
+    }
+
+
 def test_the_ports_module_type_hints_resolve():
     """A contract nothing imports can drift into referring to nothing.
 
@@ -419,4 +456,11 @@ def test_each_port_declares_at_least_one_member(protocol):
 def test_execution_result_is_what_the_broker_port_returns():
     """Pins the return type the runner's branching depends on."""
     hints = get_type_hints(member(ports.Broker, "submit"))
+    assert hints["return"] is ExecutionResult
+
+
+def test_place_takes_a_combo_order_and_returns_an_execution_result():
+    """Pins the shape the manager's one order chokepoint depends on."""
+    hints = get_type_hints(member(ports.Broker, "place"))
+    assert hints["order"] is ComboOrder
     assert hints["return"] is ExecutionResult

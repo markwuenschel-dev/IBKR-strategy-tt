@@ -289,18 +289,25 @@ def test_the_adapter_no_longer_claims_to_see_other_clients_orders():
 
 
 @pytest.mark.parametrize("call", ["reqAllOpenOrders", "reqAutoOpenOrders", "masterClient"])
-def test_the_repository_still_does_not_request_other_clients_orders(call):
-    """Pins the fact the docstring now states, so the two cannot drift apart."""
+def test_the_scanner_still_does_not_request_other_clients_orders(call):
+    """Pins the fact the docstring above states, so the two cannot drift apart.
+
+    Scoped to the scanner, whose ``portfolio()`` is the reader the docstring
+    describes. The broker's ``working_order_refs`` *does* read every client's
+    orders, on purpose: ``ports.Broker.working_order_refs`` requires the venue
+    to be asked rather than this process's memory, so a profit target resting
+    since an earlier process is still found after a restart. The pending-
+    exposure guard and the management order lookup have different scopes, and
+    this test pins only the first.
+    """
     from pathlib import Path
 
-    package = Path(__file__).resolve().parent.parent / "ibkr_trader"
-    # Look for a call, not a mention: the scanner docstring now names these
+    scanner = Path(__file__).resolve().parent.parent / "ibkr_trader" / "scanner.py"
+    # Look for a call, not a mention: the scanner docstring names these
     # precisely to record that they are absent.
-    hits = [
-        p.name for p in package.glob("*.py") if f"{call}(" in p.read_text(encoding="utf-8")
-    ]
-
-    assert hits == [], f"{call} is now called in {hits}; the docstring needs updating"
+    assert f"{call}(" not in scanner.read_text(encoding="utf-8"), (
+        f"{call} is now called in scanner.py; the docstring needs updating"
+    )
 
 
 # --- INT-023 fallout: instrument identity ------------------------------

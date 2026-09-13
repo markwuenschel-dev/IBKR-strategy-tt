@@ -60,17 +60,25 @@ short_delta_target = 0.30
 min_short_delta = 0.20
 max_short_delta = 0.40
 
-# Width of the vertical, in strike points.
-spread_width = 5
+# Long strike selection, by absolute delta. The long put is the further
+# out-of-the-money leg; the spread is as wide as the distance between the two
+# selected strikes happens to be. There is no fixed width.
+long_delta_target = 0.20
+min_long_delta = 0.10
+max_long_delta = 0.25
 
-# Minimum credit as a fraction of width. 1/3 is the classic Tastytrade bar.
+# Minimum credit as a fraction of the resulting width. 1/3 is the classic
+# Tastytrade bar; a spread that cannot pay it is rejected, never resized.
 min_credit_ratio = 0.3333333333333333
 
-# How far below spot to look for strikes, as a fraction of spot. Must cover
-# the short strike (0.20-0.40 delta, usually 3-10% OTM) plus the long strike a
-# further spread_width below. Widen for high-volatility underlyings; every
-# extra percent costs contract-qualification round trips on every scan.
+# Floor on how far below spot to look for strikes, as a fraction of spot. The
+# scanner widens it to strike_window_iv_multiple standard deviations over
+# max_dte using the underlying's current implied volatility, so the 0.20-delta
+# put on a high-volatility name is still quoted. Every extra percent costs
+# contract-qualification round trips on every scan. Set the multiple to 0 to
+# use the floor alone.
 strike_window_pct = 0.15
+strike_window_iv_multiple = 1.2
 
 # Liquidity screens, applied to every leg.
 #
@@ -93,6 +101,43 @@ allow_duplicate_symbol = false
 [reviewer]
 # The independent reviewer. Note what is absent: no heartbeat interval, no
 # liveness deadline, no session lease. It is called once per proposed trade.
+#
+# By default the review runs through the Claude Code CLI on the operator's
+# subscription login: `claude` must be on PATH and logged in (`claude /login`)
+# on this machine, and no API key is needed. The alternative is
+# backend = "anthropic_api", which calls the API directly and requires
+# ANTHROPIC_API_KEY in the environment.
+backend = "claude_code"
+command = "claude"
 model = "claude-sonnet-5"
 timeout_seconds = 90.0
-max_tokens = 1024
+# Output ceiling for the anthropic_api backend only; the CLI backend ignores it.
+#
+# 8192, matching the code default at config.py:246. Thinking tokens are output
+# tokens on an adaptive-thinking model and the JSON verdict shares the budget,
+# so 1024 risks truncating every review -- a permanent all-reviews-fail mode
+# rather than an occasional one. Do not lower this.
+max_tokens = 8192
+
+
+[management]
+# How an open spread is worked after the fill -- Tastytrade mechanics, and
+# nothing that ever adds contracts or widens a spread. Runs as phase A of
+# every `run`/`loop` pass, before the scan, and alone under `manage`.
+
+# Buy the spread back when its value falls to this fraction of the credit
+# collected. A GTC order rests at that debit (rounded up to the tick) from
+# the pass that first sees the spread filled.
+profit_target_ratio = 0.5
+
+# Days to expiration at or below which a spread is no longer held: the profit
+# order is cancelled, and the spread is rolled for a net credit or closed.
+# Must be below strategy.min_dte, or a spread would be managed the day it
+# was opened.
+manage_dte = 21
+
+# At manage_dte, try to roll: buy this spread back and sell the next cycle's
+# spread (the same selection the scan makes) when the new credit exceeds
+# the debit to close. The roll is reviewed like any new trade. Set false to
+# always close instead.
+roll = true

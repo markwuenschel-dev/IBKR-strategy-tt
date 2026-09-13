@@ -10,8 +10,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ibkr_trader.cli import EXIT_CONFIG_ERROR, is_market_open, main
+import pytest
+
+from ibkr_trader import cli
+from ibkr_trader.cli import EXIT_CONFIG_ERROR, EXIT_OK, build_reviewer, is_market_open, main
 from ibkr_trader.clock import FixedClock
+from ibkr_trader.config import build_config
+from ibkr_trader.reviewer import ClaudeCodeReviewer, ClaudeReviewer
+
+from .fakes import ACCOUNT, SCAN_TIME
 
 
 def write_config(tmp_path, body: str):
@@ -59,6 +66,96 @@ def test_contradictory_but_individually_valid_settings_are_rejected(tmp_path, ca
     )
     assert main(["run", "--config", str(path)]) == EXIT_CONFIG_ERROR
     assert "target_dte" in capsys.readouterr().err
+
+
+# --- the manage command ---------------------------------------------------
+
+
+class _RecordingRunner:
+    """Stands in for the runner; records which entry point the CLI chose."""
+
+    calls: list[str] = []
+
+    def __init__(self, **kwargs) -> None:
+        # The composition root must hand the runner the manager it built,
+        # or `run` would manage through one object and `manage` through none.
+        assert kwargs["manager"] is not None
+
+    def run_once(self):
+        self.calls.append("run_once")
+
+    def run_while(self, _predicate):
+        self.calls.append("run_while")
+
+    def manage_once(self):
+        self.calls.append("manage_once")
+
+
+class _SessionStub:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.disconnects = 0
+
+    def connect(self) -> None:
+        pass
+
+    def disconnect(self) -> None:
+        self.disconnects += 1
+
+    @property
+    def client(self):
+        return object()
+
+
+def test_the_manage_command_works_the_book_without_scanning(tmp_path, monkeypatch):
+    """``manage`` reaches ``Runner.manage_once`` and nothing else, then tears down."""
+    session = _SessionStub()
+    monkeypatch.setattr(cli, "IBKRBroker", lambda *_a, **_k: session)
+    monkeypatch.setattr(cli, "IBKRMarketData", lambda **_k: object())
+    monkeypatch.setattr(cli, "Runner", _RecordingRunner)
+    _RecordingRunner.calls = []
+    db = tmp_path / "trader.sqlite3"
+    path = write_config(
+        tmp_path,
+        f"universe = ['AAPL']\ndatabase_path = '{db.as_posix()}'\n\n"
+        f"[ibkr]\naccount = '{ACCOUNT}'\n",
+    )
+
+    exit_code = main(["manage", "--config", str(path)])
+
+    assert exit_code == EXIT_OK
+    assert _RecordingRunner.calls == ["manage_once"]
+    assert session.disconnects == 1
+
+
+def test_the_manage_command_is_advertised_and_typos_are_refused(capsys):
+    """An operator can discover it from ``--help``; argparse refuses anything else."""
+    with pytest.raises(SystemExit) as stop:
+        main(["--help"])
+    assert stop.value.code == 0
+    assert "manage" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as refused:
+        main(["manag"])
+    assert refused.value.code == 2
+
+
+# --- reviewer backend selection -------------------------------------------
+
+
+def _reviewer_config(**reviewer):
+    return build_config(
+        {"universe": ["AAPL"], "ibkr": {"account": ACCOUNT}, "reviewer": reviewer}
+    ).reviewer
+
+
+def test_the_default_backend_is_the_claude_code_cli():
+    reviewer = build_reviewer(_reviewer_config(), FixedClock(SCAN_TIME))
+    assert isinstance(reviewer, ClaudeCodeReviewer)
+
+
+def test_the_api_backend_is_selected_by_configuration():
+    reviewer = build_reviewer(_reviewer_config(backend="anthropic_api"), FixedClock(SCAN_TIME))
+    assert isinstance(reviewer, ClaudeReviewer)
 
 
 # --- market hours ---------------------------------------------------------
