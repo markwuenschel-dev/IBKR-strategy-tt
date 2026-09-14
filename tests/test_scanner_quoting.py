@@ -40,7 +40,15 @@ import pytest
 from ibkr_trader.clock import FixedClock
 from ibkr_trader.config import build_config
 from ibkr_trader.models import Right
-from ibkr_trader.scanner import EXCHANGE, IBKRMarketData
+from ibkr_trader.scanner import (
+    EXCHANGE,
+    GREEKS_WAIT_SECONDS,
+    OPTION_GENERIC_TICKS,
+    QUOTE_POLL_SECONDS,
+    QUOTE_WAIT_SECONDS,
+    UNDERLYING_GENERIC_TICKS,
+    IBKRMarketData,
+)
 
 from .fakes import ACCOUNT, SCAN_TIME
 
@@ -462,3 +470,142 @@ def test_a_non_standard_trading_class_reaches_the_snapshot_intact():
     snapshot = adapter(ib, refresh_limit=4).snapshot("AAPL")
 
     assert snapshot.trading_class == "AAPL1"
+
+
+# --- late-arriving fields: greeks and open interest ----------------------
+
+
+class LateFieldsIB:
+    """Tickers whose greeks and open interest land *after* top of book.
+
+    Every other double in this suite serves a *static* ticker, which is exactly
+    why no test here could observe the ordering that defines the defect: bid and
+    ask arrive first, model greeks and open interest one or more packets later,
+    and ``_quote_batches`` cancels the line the instant ``_await_quotes``
+    returns. A wait that is satisfied by bid/ask alone therefore guarantees the
+    two fields the strategy screens on are never seen.
+
+    ``polls`` counts pumps, so a test can assert *when* the wait ended rather
+    than only what it collected.
+    """
+
+    def __init__(self, greeks_after=2, oi_after=4):
+        self._greeks_after = greeks_after
+        self._oi_after = oi_after
+        self.tickers: list[SimpleNamespace] = []
+        self.polls = 0
+        self.open: set[int] = set()
+
+    def reqMktData(self, contract, generic_ticks, snapshot, regulatory):
+        self.open.add(id(contract))
+        ticker = SimpleNamespace(
+            contract=contract,
+            bid=1.00,
+            ask=1.10,
+            modelGreeks=None,
+            putOpenInterest=math.nan,
+            volume=100,
+        )
+        self.tickers.append(ticker)
+        return ticker
+
+    def cancelMktData(self, contract):
+        self.open.discard(id(contract))
+
+    def sleep(self, seconds):
+        self.polls += 1
+        for index, ticker in enumerate(self.tickers):
+            if self.polls >= self._greeks_after + index:
+                ticker.modelGreeks = SimpleNamespace(delta=-0.30)
+            if self.polls >= self._oi_after + index:
+                ticker.putOpenInterest = 500
+
+
+def _late_contract(strike):
+    """A put contract carrying the identity fields ``_build_quote`` reads."""
+    expiry = (SCAN_TIME.date() + timedelta(days=45)).strftime("%Y%m%d")
+    return _option("AAPL", expiry, strike, Right.PUT.value, EXCHANGE)
+
+
+def _late_quote(ib, contract, market):
+    """Quote one contract through the real batching path and build its quote."""
+    (ticker,) = market._quote_batches(ib, [contract], OPTION_GENERIC_TICKS)
+    return market._build_quote("AAPL", ticker)
+
+
+def test_greeks_that_arrive_after_top_of_book_still_reach_the_quote():
+    """The bug: a wait satisfied by bid/ask alone throws away delta and OI.
+
+    ``_await_quotes`` checked ``all(_has_market(...))`` -- bid and ask only --
+    *before* the first pump, and ``_quote_batches`` cancels the subscription the
+    moment it returns. So on any ticker whose book is already up, the greeks and
+    open interest that were one packet away were never collected, and
+    ``_build_quote`` silently substituted 0.0 and 0.
+
+    Downstream that is indistinguishable from a real market: a 0.0 delta fails
+    both delta bands and an open interest of 0 fails ``min_open_interest``, so
+    every symbol reports NO_TRADE for what looks like a market condition.
+    """
+    ib = LateFieldsIB(greeks_after=2, oi_after=4)
+    contract = _late_contract(185)
+
+    quote = _late_quote(ib, contract, adapter(ib))
+
+    assert ib.polls > 0, "the wait returned without pumping, so nothing could arrive"
+    assert quote.delta == pytest.approx(-0.30), "the real delta was thrown away"
+    assert quote.open_interest == 500, "the real open interest was thrown away"
+
+
+def test_the_wait_ends_on_the_last_ticker_not_the_first():
+    """Per-ticker, not per-batch: one straggler must not be abandoned.
+
+    ``LateFieldsIB`` staggers each ticker by its index, so the second completes
+    strictly later than the first. The wait must run until the last one is
+    ready -- and then stop, rather than spending the rest of the budget.
+    """
+    ib = LateFieldsIB(greeks_after=1, oi_after=2)
+    contracts = [_late_contract(185), _late_contract(180)]
+    market = adapter(ib)
+
+    tickers = market._quote_batches(ib, contracts, OPTION_GENERIC_TICKS)
+    quotes = [market._build_quote("AAPL", ticker) for ticker in tickers]
+
+    assert [q.open_interest for q in quotes] == [500, 500], "a straggler was abandoned"
+    assert ib.polls == 3, "the wait should end on the last ticker, not run to the cap"
+
+
+def test_a_ticker_that_never_reports_open_interest_degrades_rather_than_aborting():
+    """One silent strike must not cost the batch its whole budget.
+
+    Open interest that never arrives is a real condition, and the documented
+    fallback (0) is correct. What must not happen is paying the full
+    ``QUOTE_WAIT_SECONDS`` for it on every batch: once the whole batch has a
+    two-sided book, only the nested grace window is spent.
+    """
+    ib = LateFieldsIB(greeks_after=1, oi_after=9_999)
+    contract = _late_contract(185)
+
+    quote = _late_quote(ib, contract, adapter(ib))
+
+    assert quote.delta == pytest.approx(-0.30), "delta did arrive and must be kept"
+    assert quote.open_interest == 0, "the documented fallback still applies"
+    grace_polls = int(GREEKS_WAIT_SECONDS / QUOTE_POLL_SECONDS)
+    cap = int(QUOTE_WAIT_SECONDS / QUOTE_POLL_SECONDS)
+    assert ib.polls <= grace_polls + 1, "the grace window, not the full wait, bounds this"
+    assert ib.polls < cap, "the batch must not burn its whole budget on one silent strike"
+
+
+def test_the_underlying_never_waits_for_greeks_it_did_not_subscribe_to():
+    """Completeness is keyed on the ticks the request actually paid for.
+
+    ``UNDERLYING_GENERIC_TICKS`` does not ask for open interest, and the
+    underlying ticker carries no greeks at all. Applying the option predicate
+    to it would make every symbol pay the grace window for fields that are never
+    coming -- so ``BudgetIB.sleep`` raising is the assertion here.
+    """
+    ib = BudgetIB()
+    contracts = [SimpleNamespace(strike=None)]
+
+    collected = adapter(ib)._quote_batches(ib, contracts, UNDERLYING_GENERIC_TICKS)
+
+    assert len(collected) == 1, "the underlying was still quoted"
