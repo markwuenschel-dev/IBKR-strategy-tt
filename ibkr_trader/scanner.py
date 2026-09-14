@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
@@ -101,6 +101,26 @@ UNDERLYING_GENERIC_TICKS = "104,106"
 #: never be the thing that hangs a pass.
 QUOTE_WAIT_SECONDS = 6.0
 QUOTE_POLL_SECONDS = 0.25
+
+#: The generic tick carrying option open interest (27 call / 28 put).
+#:
+#: Named separately from :data:`OPTION_GENERIC_TICKS` because the completeness
+#: rule is keyed on it: a request that did not pay for this tick has no option
+#: fields to wait for. Keep the two in step.
+OPEN_INTEREST_TICK = "101"
+
+#: Extra pumping allowed once the whole batch has a two-sided book.
+#:
+#: Model greeks and open interest arrive *after* top of book, and the batch's
+#: subscriptions are cancelled the moment the wait returns
+#: (:meth:`IBKRMarketData._quote_batches`), so a wait satisfied by bid/ask alone
+#: guarantees delta and open interest are never seen. This is the window spent
+#: waiting for them.
+#:
+#: **Nested inside :data:`QUOTE_WAIT_SECONDS`, never added to it**: a batch can
+#: still never take longer than it does today. A strike that simply never
+#: reports open interest therefore costs this window, not the whole budget.
+GREEKS_WAIT_SECONDS = 2.0
 
 #: Strike window above spot, as a fraction of the underlying price.
 #:
@@ -1277,7 +1297,7 @@ class IBKRMarketData:
                     for contract in batch:
                         tickers.append(ib.reqMktData(contract, generic_ticks, False, False))
                         opened.append(contract)
-                    self._await_quotes(ib, tickers)
+                    self._await_quotes(ib, tickers, self._completeness(generic_ticks))
                     collected.extend(tickers)
                 finally:
                     for contract in opened:
@@ -1294,22 +1314,101 @@ class IBKRMarketData:
             raise MarketDataError(f"Cannot obtain market data: {exc}") from exc
         return collected
 
-    def _await_quotes(self, ib: Any, tickers: Sequence[Any]) -> None:
-        """Pump the client's event loop until quotes arrive or the wait expires.
+    def _await_quotes(
+        self,
+        ib: Any,
+        tickers: Sequence[Any],
+        is_complete: Callable[[Any], bool] | None = None,
+    ) -> None:
+        """Pump until every ticker carries what the screens read, or time is up.
+
+        Per ticker, not per batch: each one leaves ``pending`` the moment its own
+        fields arrive, and this returns on the last of them rather than on a
+        schedule.
+
+        The predicate used to be ``all(_has_market(...))`` — bid and ask only —
+        which ignored the two fields the strategy actually screens on. Worse, it
+        was checked *before* the first pump, so on any ticker whose book was
+        already up this returned having pumped zero times. Since
+        :meth:`_quote_batches` cancels the batch's lines the instant this
+        returns, the model greeks and open interest that were one packet away
+        were never collected, and :meth:`_build_quote` silently substituted a
+        0.0 delta and an open interest of 0 — indistinguishable, downstream,
+        from a real market that fails the screens.
+
+        Incomplete tickers are still not fatal: they degrade through the
+        documented fallbacks, and :meth:`_log_incomplete` names what was missing
+        so a pass full of them is diagnosable rather than mysterious.
 
         ``ib.sleep`` rather than ``clock.sleep``: the injected clock's sleep
         blocks the thread, and a blocked thread never runs the socket reader, so
         no tick would ever arrive. The clock still owns *time* — it measures the
-        deadline — while ``ib`` owns the pumping.
+        deadline — while ``ib`` owns the pumping. ``ib.waitOnUpdate`` is
+        deliberately *not* the pump: it returns on any packet at all, so on a
+        busy stream the iteration cap below would elapse in milliseconds and the
+        wait would collapse to nothing.
         """
+        is_complete = is_complete or self._has_market
         deadline = self._clock.now() + timedelta(seconds=QUOTE_WAIT_SECONDS)
         max_polls = max(1, int(QUOTE_WAIT_SECONDS / QUOTE_POLL_SECONDS))
+        grace_polls = max(1, int(GREEKS_WAIT_SECONDS / QUOTE_POLL_SECONDS))
+
+        pending = list(tickers)
+        since_book = 0
         for _ in range(max_polls):
+            pending = [ticker for ticker in pending if not is_complete(ticker)]
+            if not pending:
+                return
             if all(self._has_market(ticker) for ticker in tickers):
-                return
+                # Top of book is up everywhere, so only the slow fields are
+                # outstanding. Spend a bounded extra window on them rather than
+                # the whole budget: one strike that never reports open interest
+                # must not cost every symbol the full wait.
+                if since_book >= grace_polls:
+                    break
+                since_book += 1
             if self._clock.now() >= deadline:
-                return
+                break
             ib.sleep(QUOTE_POLL_SECONDS)
+        self._log_incomplete(pending)
+
+    @classmethod
+    def _log_incomplete(cls, pending: Sequence[Any]) -> None:
+        """Name what was still missing when the wait ended.
+
+        The whole point of the line: a 0.0 delta and an open interest of 0 are
+        indistinguishable downstream from a real market that fails the screens,
+        so without this a pass starved of greeks looks like a quiet market.
+        """
+        if not pending:
+            return
+        no_book = sum(1 for ticker in pending if not cls._has_market(ticker))
+        no_delta = sum(
+            1
+            for ticker in pending
+            if cls._has_market(ticker) and cls._model_delta(ticker) is None
+        )
+        logger.debug(
+            "quote wait ended with %d of the batch incomplete "
+            "(%d no book, %d no delta, %d no open interest)",
+            len(pending),
+            no_book,
+            no_delta,
+            len(pending) - no_book - no_delta,
+        )
+
+    @classmethod
+    def _completeness(cls, generic_ticks: str) -> Callable[[Any], bool]:
+        """The arrival test for exactly the fields this request paid a tick for.
+
+        A request that never asked for open interest has no option fields to
+        wait for. The underlying is the case that matters —
+        :data:`UNDERLYING_GENERIC_TICKS` carries no greeks and no open interest —
+        and waiting on fields it never subscribed to would spend the grace
+        window on every symbol for nothing.
+        """
+        requested = {tick.strip() for tick in generic_ticks.split(",")}
+        return cls._has_option_market if OPEN_INTEREST_TICK in requested else cls._has_market
 
     @staticmethod
     def _has_market(ticker: Any) -> bool:
@@ -1317,6 +1416,36 @@ class IBKRMarketData:
         return (
             _finite(getattr(ticker, "bid", None)) is not None
             and _finite(getattr(ticker, "ask", None)) is not None
+        )
+
+    @classmethod
+    def _has_option_market(cls, ticker: Any) -> bool:
+        """True when an option ticker carries everything the screens read.
+
+        Bid and ask are not enough: ``tastytrade._rank_short_puts`` and
+        ``_rank_long_puts`` both screen on delta, and ``_liquidity_failure``
+        screens on open interest. All three arrive after top of book.
+        """
+        return (
+            cls._has_market(ticker)
+            and cls._model_delta(ticker) is not None
+            and cls._open_interest_arrived(ticker)
+        )
+
+    @staticmethod
+    def _open_interest_arrived(ticker: Any) -> bool:
+        """True once the open-interest tick has been delivered for either side.
+
+        ``_finite`` rather than ``_count``: the venue writes a real ``0`` for a
+        strike with genuinely no open interest and leaves NaN for one it has not
+        sent yet, and ``_count`` flattens both to ``0``. Only the NaN means
+        "keep waiting". Either side counts — IBKR sends only the one matching
+        the contract's right, and threading that right through here would buy
+        nothing.
+        """
+        return any(
+            _finite(getattr(ticker, field, None)) is not None
+            for field in ("putOpenInterest", "callOpenInterest")
         )
 
     def _build_quote(
@@ -1328,11 +1457,16 @@ class IBKRMarketData:
         (spread percentage, credit, limit price) is defined in terms of both
         sides, and a one-sided market cannot be filled at a computed midpoint.
 
-        Missing *greeks* are not fatal. Delta falls back to 0.0, which cannot be
-        mistaken for a real reading: ``StrategyConfig.min_short_delta`` is
-        constrained ``> 0``, so a 0.0-delta quote can never be selected as the
-        short strike, while still remaining available as the long leg (which is
-        chosen by strike, not by delta).
+        Missing *greeks* are not fatal here, but they are not harmless either.
+        Delta falls back to 0.0, which cannot be mistaken for a real reading:
+        ``StrategyConfig.min_short_delta`` is constrained ``> 0``, so a 0.0-delta
+        quote can never be selected as the short strike. Note it cannot serve as
+        the *long* leg either — ``tastytrade._rank_long_puts`` filters on
+        ``min_long_delta <= abs(delta) <= max_long_delta``, so 0.0 fails that
+        band too. Such a quote is therefore invisible to selection, and the
+        refusal blames the delta band rather than the missing tick, which is why
+        :meth:`_await_quotes` waits for the greek rather than relying on this
+        fallback.
 
         ``right`` is what the ticker was requested as; the chain only ever asks
         for puts, so it defaults to that. The identity fields come from the
@@ -1378,10 +1512,21 @@ class IBKRMarketData:
         return _price(bid), _price(ask)
 
     @staticmethod
-    def _delta(ticker: Any) -> float:
-        """Model delta, falling back to last-computed greeks, then to 0.0."""
+    def _model_delta(ticker: Any) -> float | None:
+        """This ticker's real model delta, or None when none has arrived.
+
+        Split from :meth:`_delta` because the two questions are different: the
+        wait needs to know whether a reading *exists*, and only the quote needs
+        the fallback. Collapsing them is what let a not-yet-arrived greek be
+        read as a real 0.0.
+        """
         greeks = getattr(ticker, "modelGreeks", None) or getattr(ticker, "lastGreeks", None)
-        delta = _finite(getattr(greeks, "delta", None)) if greeks else None
+        return _finite(getattr(greeks, "delta", None)) if greeks else None
+
+    @classmethod
+    def _delta(cls, ticker: Any) -> float:
+        """Model delta, falling back to last-computed greeks, then to 0.0."""
+        delta = cls._model_delta(ticker)
         return delta if delta is not None else 0.0
 
     @staticmethod
