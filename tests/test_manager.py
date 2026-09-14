@@ -225,8 +225,11 @@ def test_a_working_order_reconciles_at_its_limit_once_the_legs_appear(tmp_path):
     assert row is not None and row.open_credit == Decimal("1.75")
 
 
-def test_an_order_whose_legs_are_not_held_is_left_alone(tmp_path):
-    manager, _, _, broker, store = build_manager(tmp_path, market=StubMarketData())
+def _unfilled_opening(tmp_path, clock):
+    """An opening order that reached the venue and whose legs are not held."""
+    manager, _, _, broker, store = build_manager(
+        tmp_path, market=StubMarketData(), clock=clock
+    )
     store.record(
         SymbolResult(
             "AAPL",
@@ -237,12 +240,63 @@ def test_an_order_whose_legs_are_not_held_is_left_alone(tmp_path):
         ),
         RUN,
     )
+    return manager, broker, store
+
+
+def test_an_order_whose_legs_are_not_held_is_reported_not_silently_skipped(tmp_path):
+    """The order is still live, so nothing is decided -- but the operator is told.
+
+    Previously this emitted nothing at all, which made a resting order that
+    never fills indistinguishable from a pass that proposed nothing.
+    """
+    clock = FixedClock(SCAN_TIME)
+    manager, broker, store = _unfilled_opening(tmp_path, clock)
+    broker.working_refs = {"open-1"}
 
     summary = manager.run(RUN)
 
-    assert summary.actions == ()
+    assert kinds(summary) == [ManagementKind.OPENING_WORKING]
+    assert store.spreads() == []
+    assert broker.placed == [], "reporting is not acting"
+    assert len(store.unreconciled_openings()) == 1, "still live; keep watching it"
+
+
+def test_an_opening_order_that_never_filled_is_reported_once_its_session_is_over(tmp_path):
+    """A DAY order absent from the book on a later session date is dead.
+
+    This is the signal that tells the operator a screen change produced orders
+    that could not fill, rather than no orders at all.
+    """
+    clock = FixedClock(SCAN_TIME)
+    manager, broker, store = _unfilled_opening(tmp_path, clock)
+    broker.working_refs = set()
+    clock.advance(24 * 3600)
+
+    summary = manager.run(RUN)
+
+    assert kinds(summary) == [ManagementKind.OPENING_UNFILLED]
     assert store.spreads() == []
     assert broker.placed == []
+    assert store.unreconciled_openings() == (), "marked, so it is not re-read forever"
+
+
+def test_an_order_missing_from_the_book_inside_its_own_session_is_not_declared_dead(tmp_path):
+    """``working_order_refs()`` sees only this client's orders.
+
+    ``_pending_positions`` reads ``ib.openTrades()``, not ``reqAllOpenOrders``
+    (scanner.py:784-791), so a TWS restart or a changed client id empties the
+    set while the order is still live at the venue. Declaring it dead on that
+    basis would stop its eventual fill from ever being reconciled, so the
+    session date has to agree before anything is marked.
+    """
+    clock = FixedClock(SCAN_TIME)
+    manager, broker, store = _unfilled_opening(tmp_path, clock)
+    broker.working_refs = set()
+
+    summary = manager.run(RUN)
+
+    assert kinds(summary) == [ManagementKind.OPENING_WORKING]
+    assert len(store.unreconciled_openings()) == 1, "never marked on one weak signal"
 
 
 # --- 2. the profit target -----------------------------------------------------

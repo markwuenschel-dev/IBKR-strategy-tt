@@ -228,7 +228,7 @@ class Manager:
             self._isolated(
                 opening.symbol,
                 opening.proposal_id,
-                lambda opening=opening: self._reconcile(opening, held, emit),
+                lambda opening=opening: self._reconcile(opening, held, refs, emit),
                 emit,
             )
 
@@ -299,16 +299,69 @@ class Manager:
 
     # --- 1. reconciliation -----------------------------------------------
 
+    def _report_unfilled(
+        self, opening: OpeningOrder, refs: frozenset[str], emit: Emit
+    ) -> None:
+        """Say what became of an opening order whose legs are not held.
+
+        Two states, and the difference between them is the whole point: an
+        order still in the broker's working set is resting and may yet fill,
+        while one absent from that set on a *later* session date is a DAY
+        limit (``broker.py`` builds every opening order with ``Tif.DAY``) that
+        expired unfilled and never will.
+
+        Neither state used to be reported at all. That silence is what makes a
+        liquidity screen admitting spreads nobody will fill look identical, from
+        the outside, to a screen admitting nothing -- no positions either way.
+
+        The session date has to agree before anything is marked, because
+        ``working_order_refs`` sees only this client's orders
+        (``scanner._pending_positions`` reads ``openTrades()``, not
+        ``reqAllOpenOrders``). A restarted TWS empties that set while the order
+        is still live, and marking it then would stop its eventual fill from
+        ever being reconciled.
+        """
+        now = self._clock.now()
+        placed_on = market_date(opening.recorded_at)
+        legs = f"{opening.short_strike}/{opening.long_strike} {opening.expiry.isoformat()}"
+        if opening.proposal_id in refs or placed_on >= market_date(now):
+            resting = (now - opening.recorded_at).total_seconds() / 3600
+            emit(
+                ManagementAction(
+                    opening.symbol,
+                    ManagementKind.OPENING_WORKING,
+                    f"{opening.quantity}x {legs} resting at {opening.limit_price} "
+                    f"for {resting:.1f}h, not filled",
+                    spread_id=opening.proposal_id,
+                )
+            )
+            return
+        detail = (
+            f"{opening.quantity}x {legs} at {opening.limit_price} never filled; "
+            f"the DAY order placed {placed_on.isoformat()} is no longer working"
+        )
+        self._store.record_abandoned_opening(opening.proposal_id, detail)
+        emit(
+            ManagementAction(
+                opening.symbol,
+                ManagementKind.OPENING_UNFILLED,
+                detail,
+                spread_id=opening.proposal_id,
+            )
+        )
+
     def _reconcile(
-        self, opening: OpeningOrder, held: Mapping[OptionLeg, int], emit: Emit
+        self,
+        opening: OpeningOrder,
+        held: Mapping[OptionLeg, int],
+        refs: frozenset[str],
+        emit: Emit,
     ) -> None:
         short_leg = OptionLeg(opening.symbol, opening.expiry, opening.short_strike, Right.PUT)
         long_leg = OptionLeg(opening.symbol, opening.expiry, opening.long_strike, Right.PUT)
         legs = _Held(held.get(short_leg, 0), held.get(long_leg, 0))
         if not legs.intact:
-            # Still working, or never filled. Either way there is nothing to
-            # manage yet, and nothing to record: the order row already says
-            # what was sent.
+            self._report_unfilled(opening, refs, emit)
             return
 
         quantity = min(legs.quantity, opening.quantity)
