@@ -192,9 +192,9 @@ def store(tmp_path, clock):
 
 
 def test_a_fresh_file_is_stamped_with_the_current_version_and_both_new_tables(store):
-    assert SCHEMA_VERSION == 2
-    assert _user_version(store._conn) == 2
-    assert {"spreads", "management_actions"} <= _tables(store._conn)
+    assert SCHEMA_VERSION == 3
+    assert _user_version(store._conn) == SCHEMA_VERSION
+    assert {"spreads", "management_actions", "abandoned_openings"} <= _tables(store._conn)
 
 
 def test_a_pre_versioned_file_is_upgraded_in_place_and_keeps_its_rows(tmp_path):
@@ -216,8 +216,8 @@ def test_a_pre_versioned_file_is_upgraded_in_place_and_keeps_its_rows(tmp_path):
 
     store = SqliteStore(path)
     try:
-        assert _user_version(store._conn) == 2
-        assert {"spreads", "management_actions"} <= _tables(store._conn)
+        assert _user_version(store._conn) == SCHEMA_VERSION
+        assert {"spreads", "management_actions", "abandoned_openings"} <= _tables(store._conn)
         assert [row["run_id"] for row in store.runs()] == ["r-old"]
         assert [row["detail"] for row in store.attempts()] == ["kept"]
         assert store.live_spreads() == ()
@@ -233,8 +233,8 @@ def test_a_version_one_file_gains_the_management_tables(tmp_path):
 
     store = SqliteStore(path)
     try:
-        assert _user_version(store._conn) == 2
-        assert {"spreads", "management_actions"} <= _tables(store._conn)
+        assert _user_version(store._conn) == SCHEMA_VERSION
+        assert {"spreads", "management_actions", "abandoned_openings"} <= _tables(store._conn)
     finally:
         store.close()
 
@@ -242,7 +242,7 @@ def test_a_version_one_file_gains_the_management_tables(tmp_path):
 def test_a_file_from_a_newer_engine_is_refused_by_name_and_left_alone(tmp_path):
     path = tmp_path / "future.sqlite3"
     newer = sqlite3.connect(path)
-    newer.execute("PRAGMA user_version = 3")
+    newer.execute("PRAGMA user_version = 4")
     newer.commit()
     newer.close()
 
@@ -251,12 +251,12 @@ def test_a_file_from_a_newer_engine_is_refused_by_name_and_left_alone(tmp_path):
 
     message = str(info.value)
     assert re.search(re.escape(str(path)), message)
+    assert "version 4" in message
     assert "version 3" in message
-    assert "version 2" in message
 
     check = sqlite3.connect(path)
     try:
-        assert _user_version(check) == 3
+        assert _user_version(check) == 4
         assert _tables(check) == set()
     finally:
         check.close()

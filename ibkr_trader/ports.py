@@ -280,7 +280,16 @@ class Store(Protocol):
         """Opening orders that reached the venue and have no spread row yet.
 
         An order is "reached the venue" when its recorded outcome is in
-        ``SUBMITTED_OUTCOMES`` other than ``BROKER_REJECTED``.
+        ``SUBMITTED_OUTCOMES`` other than ``BROKER_REJECTED``. Orders marked
+        by :meth:`record_abandoned_opening` are excluded.
+        """
+        ...
+
+    def record_abandoned_opening(self, proposal_id: str, detail: str) -> None:
+        """Mark an opening order that will never fill, so it stops being re-read.
+
+        Must be idempotent: called once per order in the normal path, but a
+        second call for the same id must not raise.
         """
         ...
 

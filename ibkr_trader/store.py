@@ -60,7 +60,7 @@ from .models import (
 #: The schema version this engine writes. Bump it whenever a statement is
 #: added to :data:`_SCHEMA_V2` or a later block, and add the upgrade step in
 #: :func:`_apply_schema`.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: The six history tables. Version 1 of the schema, though no engine ever
 #: stamped that number: files of this shape carry ``user_version`` 0.
@@ -179,6 +179,23 @@ CREATE INDEX IF NOT EXISTS idx_management_run ON management_actions (run_id);
 CREATE INDEX IF NOT EXISTS idx_management_spread ON management_actions (spread_id);
 """
 
+#: Added in version 3. One row per opening order that reached the venue and
+#: then stopped being workable without producing a position -- a DAY limit that
+#: expired unfilled at the close, or one cancelled outside this process.
+#:
+#: The table exists because ``unreconciled_openings`` has no age or status
+#: predicate: without a marker the same dead row is re-read and silently
+#: skipped on every pass forever, and nothing ever tells the operator that an
+#: order failed to fill. That silence makes a screen that admits unfillable
+#: spreads look exactly like a screen that admits nothing.
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS abandoned_openings (
+    proposal_id TEXT PRIMARY KEY,
+    detail      TEXT NOT NULL DEFAULT '',
+    noticed_at  TEXT NOT NULL
+);
+"""
+
 #: Status values a spread row must carry to be returned by ``live_spreads``.
 #: Sorted so the query text, and therefore the plan, is the same every open.
 _LIVE_STATUS_VALUES = tuple(sorted(status.value for status in LIVE_SPREAD_STATUSES))
@@ -221,9 +238,11 @@ def _apply_schema(conn: sqlite3.Connection, path: Path) -> None:
             f"version {SCHEMA_VERSION}. It was written by a newer engine."
         )
     if version == 0:
-        conn.executescript(_SCHEMA_V1 + _SCHEMA_V2)
+        conn.executescript(_SCHEMA_V1 + _SCHEMA_V2 + _SCHEMA_V3)
     elif version == 1:
-        conn.executescript(_SCHEMA_V2)
+        conn.executescript(_SCHEMA_V2 + _SCHEMA_V3)
+    elif version == 2:
+        conn.executescript(_SCHEMA_V3)
     # PRAGMA takes no bound parameters; the value is a module-level int.
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -435,6 +454,19 @@ class SqliteStore:
                 ),
             )
 
+    def record_abandoned_opening(self, proposal_id: str, detail: str) -> None:
+        """Mark an opening order that will never fill, so it stops being re-read.
+
+        Idempotent: the manager reaches this once per order, but a re-run over
+        the same database must not fail on the primary key.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO abandoned_openings "
+                "(proposal_id, detail, noticed_at) VALUES (?, ?, ?)",
+                (proposal_id, detail, self._clock.now().isoformat()),
+            )
+
     def live_spreads(self) -> tuple[Spread, ...]:
         """Every spread whose status is in ``LIVE_SPREAD_STATUSES``.
 
@@ -465,6 +497,11 @@ class SqliteStore:
         proposal's own legs, the fill figures from whatever fills the
         submission window recorded -- which may be none, for a ``WORKING``
         order, and is what the manager reconciles against the account.
+
+        Orders marked by :meth:`record_abandoned_opening` are excluded. There
+        is deliberately still no age predicate here: deciding an order is dead
+        needs the broker's working set, which this class cannot see, so that
+        judgement belongs to the manager and is durable only once it is made.
         """
         placeholders = ", ".join("?" for _ in _REACHED_VENUE_VALUES)
         rows = self._conn.execute(
@@ -473,6 +510,8 @@ class SqliteStore:
             "FROM orders AS o JOIN trade_proposals AS p ON p.proposal_id = o.proposal_id "
             f"WHERE o.outcome IN ({placeholders}) "
             "AND NOT EXISTS (SELECT 1 FROM spreads AS s WHERE s.spread_id = o.proposal_id) "
+            "AND NOT EXISTS (SELECT 1 FROM abandoned_openings AS a "
+            "                WHERE a.proposal_id = o.proposal_id) "
             "ORDER BY o.recorded_at, o.proposal_id",
             _REACHED_VENUE_VALUES,
         ).fetchall()
