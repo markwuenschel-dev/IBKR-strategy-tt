@@ -55,6 +55,7 @@ import logging
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import TypeVar
@@ -379,10 +380,68 @@ class Runner:
         while market_is_open():
             if max_passes is not None and len(summaries) >= max_passes:
                 break
+            started = self._clock.now()
             summaries.append(self.run_once())
             if market_is_open():
-                self._clock.sleep(self._config.scan_interval_seconds)
+                self._wait_for_next_scan(started, market_is_open)
         return summaries
+
+    def _wait_for_next_scan(
+        self, started: datetime, market_is_open: Callable[[], bool]
+    ) -> None:
+        """Sleep until the next scan is due, working the book on the way.
+
+        The wait is measured from when the *last scan started*, not from when it
+        finished, so the cadence the operator configured is the cadence they
+        get. Sleeping the whole interval afterwards made the real period
+        ``pass_duration + interval``, which on a hundred-name universe is a
+        quarter of an hour of silent drift per pass.
+
+        Management runs on its own, shorter cadence inside that wait, because
+        the two jobs have opposite economics: a scan quotes thousands of
+        contracts and is worth doing rarely, while reconciling a fill and
+        resting its profit target is nearly free and wants to happen soon after
+        the fill rather than up to a full scan interval later.
+
+        A pass that overruns its period returns immediately rather than
+        skipping ahead or sleeping a negative amount.
+        """
+        interval = self._config.scan_interval_seconds
+        due = started + timedelta(seconds=interval)
+        overrun = (self._clock.now() - due).total_seconds()
+        if overrun > 0:
+            log.warning(
+                "pass took %.0fs longer than the %.0fs scan interval; "
+                "starting the next one immediately",
+                overrun,
+                interval,
+            )
+            return
+
+        while market_is_open():
+            remaining = (due - self._clock.now()).total_seconds()
+            if remaining <= 0:
+                return
+            self._clock.sleep(min(self._config.manage_interval_seconds, remaining))
+            if (due - self._clock.now()).total_seconds() <= 0:
+                # The scan is due now, and it manages before it scans.
+                return
+            if market_is_open() and self._has_book():
+                self.manage_once()
+
+    def _has_book(self) -> bool:
+        """Whether the durable record holds anything worth a management pass.
+
+        Read from the store rather than the broker: it costs a local query
+        instead of a round trip, and both states that need managing are already
+        recorded there -- a spread that is open, and an opening order that
+        reached the venue and has not been reconciled into one.
+
+        A stray position the store has never heard of is *not* covered here and
+        does not need to be: the scan's own management phase runs the
+        unmanaged-position sweep every period regardless.
+        """
+        return bool(self._store.live_spreads() or self._store.unreconciled_openings())
 
     def manage_once(self) -> ManagementSummary:
         """Phase A on its own: work the book without scanning for new trades.

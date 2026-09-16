@@ -118,15 +118,17 @@ class Quoted:
     def spread_pct(self) -> float:
         """Bid/ask spread as a fraction of mid; infinite when mid is zero.
 
-        This is the liquidity screen: a wide relative spread means the fill will
-        be poor no matter how attractive the theoretical credit looks.
+        A liquidity *preference*, not a screen: ``ranking`` orders candidates by
+        the mean of this across their legs, and it reaches the reviewer in the
+        leg payload. Nothing rejects on it -- see
+        ``tastytrade._liquidity_failure`` for why that gate was removed.
 
-        Infinity is deliberate and load-bearing. ``tastytrade`` tests
-        ``spread_pct > max_spread_pct``, so a dead book must compare *greater*
-        than any configured bound and be rejected. ``None`` would raise inside
-        the pure algorithm and zero would read as a perfectly tight market. The
-        wire needs a JSON-safe value instead, and :func:`leg_payload` is the one
-        place that converts -- a serialization rule, not a second arithmetic.
+        Infinity is deliberate. A zero mid has no meaningful ratio, and zero
+        would read as a perfectly tight market -- the best possible rank -- for
+        a book nobody is quoting. ``None`` would raise inside the pure
+        algorithm. The wire needs a JSON-safe value instead, and
+        :func:`leg_payload` is the one place that converts -- a serialization
+        rule, not a second arithmetic.
         """
         mid = self.mid
         if mid <= 0:

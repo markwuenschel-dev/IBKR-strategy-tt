@@ -153,8 +153,10 @@ class StrategyConfig(_Base):
     #: Set to 0 to disable the volatility scaling and use the floor alone.
     strike_window_iv_multiple: float = Field(default=1.2, ge=0.0, le=5.0)
 
-    #: Liquidity screens applied to every leg.
-    max_spread_pct: float = Field(default=0.10, gt=0.0, le=1.0)
+    #: Liquidity screens applied to every leg. Bid/ask width is deliberately
+    #: absent: it was a gate, it refused more symbols than every other rule
+    #: combined, and it is now a ranking preference and a reviewer input
+    #: instead. See ``tastytrade._liquidity_failure``.
     min_open_interest: int = Field(default=100, ge=0)
     min_volume: int = Field(default=0, ge=0)
 
@@ -280,8 +282,22 @@ class RunConfig(_Base):
     #: Where the durable record lives.
     database_path: Path = Path("ibkr_trader.sqlite3")
 
-    #: Seconds between passes when running continuously. Ignored for a single pass.
+    #: Seconds between the *start* of one pass and the start of the next when
+    #: running continuously. A period, not a gap: a pass that takes fifteen
+    #: minutes on a forty-five minute interval is followed by thirty minutes of
+    #: waiting, not forty-five. A pass that overruns the period starts the next
+    #: one immediately. Ignored for a single pass.
     scan_interval_seconds: float = Field(default=300.0, gt=0, le=86_400)
+
+    #: Seconds between management-only passes taken *while waiting* for the next
+    #: scan. Management is cheap and wants to happen soon after a fill; the scan
+    #: is expensive and does not. A management pass is skipped entirely when the
+    #: book holds nothing, so an idle session costs nothing extra.
+    #:
+    #: Not constrained against ``scan_interval_seconds``: when it is the longer
+    #: of the two the wait simply never reaches one, which is a coherent
+    #: "only manage on the scan cadence" and needs no error.
+    manage_interval_seconds: float = Field(default=900.0, gt=0, le=86_400)
 
     @model_validator(mode="after")
     def _management_precedes_entry(self) -> RunConfig:

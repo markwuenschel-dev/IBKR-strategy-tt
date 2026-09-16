@@ -404,14 +404,20 @@ def tradable_snapshot(symbol: str = "AAPL", iv_rank: float = 45.0) -> MarketSnap
 
 
 def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
-    """A snapshot where the right strikes exist but the market is unusably wide.
+    """A snapshot where the right strikes exist but nothing is tradable there.
 
     Verifies that "no trade" comes from the liquidity screen rather than from an
     absent chain.
+
+    Illiquidity is expressed as open interest of 1 against the default 100
+    minimum. It used to be an unusably wide bid/ask, which stopped meaning
+    anything when the width gate was removed -- and a fixture that quietly
+    starts trading is worse than one that fails, so this states the condition in
+    terms of a screen that still exists.
     """
     wide = [
-        quote(symbol, GOOD_EXPIRY, "185", Right.PUT, "2.00", "4.80", -0.30),
-        quote(symbol, GOOD_EXPIRY, "180", Right.PUT, "0.40", "2.90", -0.20),
+        quote(symbol, GOOD_EXPIRY, "185", Right.PUT, "2.00", "4.80", -0.30, open_interest=1),
+        quote(symbol, GOOD_EXPIRY, "180", Right.PUT, "0.40", "2.90", -0.20, open_interest=1),
     ]
     return MarketSnapshot(
         symbol=symbol,
