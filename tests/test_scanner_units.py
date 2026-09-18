@@ -232,3 +232,39 @@ def test_a_fractional_position_is_not_truncated_out_of_existence(reported, expec
     this number is read to answer, while leaving whole sizes untouched.
     """
     assert _whole_contracts(reported) == expected
+
+
+# --- the bag's own quote -----------------------------------------------------
+
+
+def test_a_credit_spread_s_negative_quote_is_read_not_discarded():
+    """The trap this helper exists to avoid.
+
+    ``_two_sided`` -- the reader for a single option -- requires a non-negative
+    bid and a positive ask. A credit spread's bag is quoted in prices *paid*,
+    so it is negative on both sides, and reusing that reader would have thrown
+    every credit spread's quote away as malformed. Silently: the caller cannot
+    tell a discarded quote from a venue that declined to quote.
+    """
+    ticker = SimpleNamespace(bid=-1.90, ask=-1.50)
+
+    quote = IBKRMarketData._combo_quote(ticker)
+
+    assert quote is not None
+    assert quote.marketable_credit == Decimal("1.50"), "crossing collects the lower credit"
+    assert quote.credit_mid == Decimal("1.70")
+    assert quote.width == Decimal("0.40")
+
+
+def test_a_crossed_or_absent_bag_book_is_no_quote_at_all():
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=-1.50, ask=-1.90)) is None
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=float("nan"), ask=-1.9)) is None
+    assert IBKRMarketData._combo_quote(SimpleNamespace()) is None
+
+
+def test_a_debit_spread_quote_still_reads_correctly():
+    """Nothing here assumes the credit direction; a debit bag quotes positive."""
+    quote = IBKRMarketData._combo_quote(SimpleNamespace(bid=1.50, ask=1.90))
+
+    assert quote.marketable_credit == Decimal("-1.90"), "paying 1.90 is a negative credit"
+    assert quote.credit_mid == Decimal("-1.70")

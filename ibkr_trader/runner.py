@@ -84,6 +84,7 @@ from .models import (
     Portfolio,
     SymbolResult,
     TradeProposal,
+    opening_combo_legs,
 )
 from .ports import Broker, MarketData, Reviewer, Store
 from .ranking import RankedProposal
@@ -576,8 +577,59 @@ class Runner:
         if isinstance(decided, SymbolResult):
             return replace(decided, detail=f"{place}; on re-quote: {decided.detail}")
 
-        result = self._review_and_submit(symbol, decided, portfolio)
+        result = self._review_and_submit(symbol, self._with_combo_market(decided), portfolio)
         return replace(result, detail=f"{place}; {result.detail}")
+
+    def _with_combo_market(self, proposal: TradeProposal) -> TradeProposal:
+        """The same proposal, with the bag's own market recorded in its criteria.
+
+        Instrumentation, not a screen. Every price this engine computes comes
+        from leg arithmetic -- ``short.mid - long.mid`` and the natural credit
+        implied by the two books -- but a combo fills against the bag's own
+        book, which has its own quote and its own price-improvement auction. On
+        2026-09-17 an order rested two hours at a limit that leg arithmetic said
+        was at the midpoint, and nothing in the record could say how far from
+        the market that actually was, because the bag had never been quoted.
+
+        The quote is taken *here* rather than after submission so it describes
+        the market the order was about to meet, and it reaches the reviewer,
+        who can now refuse a credit that is nowhere near the bag's book.
+
+        Failure is absorbed on purpose and at the widest scope: a measurement
+        must never cost a reviewed trade. ``replace`` keeps ``proposal_id``,
+        which is correct -- this is the same proposal, with one more thing
+        known about it.
+        """
+        try:
+            quote = self._market_data.quote_combo(
+                proposal.symbol, opening_combo_legs(proposal)
+            )
+        except Exception:  # noqa: BLE001 - instrumentation must not block a trade
+            # Not "%s: ..." -- a line starting with the symbol is the
+            # operator's per-symbol outcome line, and only one of those exists.
+            log.warning("could not quote the bag for %s; submitting anyway", proposal.symbol)
+            return proposal
+
+        if quote is None:
+            log.info("venue did not quote the bag for %s", proposal.symbol)
+            return replace(
+                proposal,
+                criteria={**proposal.criteria, "combo_market": "not quoted by the venue"},
+            )
+
+        marketable = quote.marketable_credit
+        gap = proposal.limit_price - marketable
+        return replace(
+            proposal,
+            criteria={
+                **proposal.criteria,
+                "combo_market": (
+                    f"bag quotes {marketable} to {-quote.wire_bid} credit, "
+                    f"mid {quote.credit_mid}; our limit {proposal.limit_price} is "
+                    f"{gap} above the marketable credit"
+                ),
+            },
+        )
 
     def _quote(self, symbol: str) -> tuple[MarketSnapshot, Portfolio]:
         """One symbol's market and the account, read together.

@@ -56,11 +56,14 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
+from .bag import bag_contract
 from .clock import Clock, market_date
 from .config import IBKRConfig, StrategyConfig
 from .errors import MarketDataError
 from .models import (
     CONTRACT_MULTIPLIER,
+    ComboLeg,
+    ComboQuote,
     MarketSnapshot,
     OptionLeg,
     OptionPosition,
@@ -614,6 +617,62 @@ class IBKRMarketData:
         return tuple(
             self._leg_quote(leg, ticker) for leg, ticker in zip(wanted, tickers, strict=True)
         )
+
+    def quote_combo(self, symbol: str, legs: Sequence[ComboLeg]) -> ComboQuote | None:
+        """The bag's own market, or None when the venue did not quote it.
+
+        The legs are qualified and assembled through :func:`bag.bag_contract`,
+        the same constructor the broker transmits with, so the book measured
+        here is the book the order would meet.
+
+        No generic ticks: a bag reports no open interest, no volume and no
+        greeks, so asking for them would spend the grace window in
+        :meth:`_await_quotes` waiting for fields that never arrive.
+
+        Raises:
+            MarketDataError: the legs could not be qualified, or the
+                market-data request itself failed.
+        """
+        wanted = tuple(legs)
+        if not wanted:
+            return None
+        ib = self._client()
+        api = self._require_api()
+
+        option_legs = [combo_leg.leg for combo_leg in wanted]
+        contracts = [self._leg_contract(api, leg) for leg in option_legs]
+        resolved = self._qualify_legs(ib, option_legs, contracts)
+        con_ids = [int(getattr(contract, "conId", 0) or 0) for contract in resolved]
+        try:
+            bag = bag_contract(api, symbol, wanted, con_ids, EXCHANGE, CURRENCY)
+        except ValueError as exc:
+            raise MarketDataError(f"cannot form a {symbol} bag to quote: {exc}") from exc
+
+        self._apply_market_data_type(ib)
+        tickers = self._quote_batches(ib, [bag], "")
+        if not tickers:
+            return None
+        return self._combo_quote(tickers[0])
+
+    @staticmethod
+    def _combo_quote(ticker: Any) -> ComboQuote | None:
+        """One bag ticker as a :class:`ComboQuote`, or None for an unusable book.
+
+        Deliberately *not* :meth:`_two_sided`, which requires a non-negative bid
+        and a positive ask. Those bounds are right for a single option and wrong
+        here: a credit spread's bag quotes negative on both sides, because the
+        wire price is what is *paid* for the bag. Reusing the leg reader would
+        have discarded every credit spread's quote as malformed -- and silently,
+        as a venue that declined to quote.
+
+        What remains is what makes any book meaningful: two finite sides that
+        are not crossed.
+        """
+        bid = _finite(getattr(ticker, "bid", None))
+        ask = _finite(getattr(ticker, "ask", None))
+        if bid is None or ask is None or ask < bid:
+            return None
+        return ComboQuote(wire_bid=_price(bid), wire_ask=_price(ask))
 
     @staticmethod
     def _describe_leg(leg: OptionLeg) -> str:

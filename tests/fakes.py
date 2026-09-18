@@ -17,7 +17,9 @@ from decimal import Decimal
 
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import (
+    ComboLeg,
     ComboOrder,
+    ComboQuote,
     ExecutionResult,
     Fill,
     MarketSnapshot,
@@ -85,6 +87,8 @@ class StubMarketData:
         option_positions_per_call: Sequence[Sequence[OptionPosition]] | None = None,
         option_positions_error: Exception | None = None,
         quotes: dict[OptionLeg, OptionQuote] | None = None,
+        combo_quotes: dict[str, ComboQuote | None] | None = None,
+        combo_quote_error: Exception | None = None,
     ) -> None:
         self._snapshots = snapshots or {}
         self._failures = failures or {}
@@ -102,6 +106,12 @@ class StubMarketData:
         )
         self._option_positions_error = option_positions_error
         self._quotes = dict(quotes or {})
+        #: Bag quotes per symbol. An unconfigured symbol is quoted ``None`` --
+        #: the venue declining to quote the combo -- because that is the
+        #: default every existing test needs: instrumentation that is absent
+        #: must change nothing about what they assert.
+        self._combo_quotes = dict(combo_quotes or {})
+        self._combo_quote_error = combo_quote_error
         #: Every symbol asked for, in order, repeats included. The runner quotes
         #: a symbol once during the scan and again before submitting it, so a
         #: test can read which symbols reached submission from this alone.
@@ -110,6 +120,8 @@ class StubMarketData:
         self.position_reads = 0
         #: Every leg list the manager asked to quote, in order.
         self.quoted: list[tuple[OptionLeg, ...]] = []
+        #: Every bag asked about, as ``(symbol, legs)``, in order.
+        self.combo_quoted: list[tuple[str, tuple[ComboLeg, ...]]] = []
 
     def snapshot(self, symbol: str) -> MarketSnapshot:
         """Serve the configured snapshot; from the second request, the re-quote.
@@ -158,6 +170,19 @@ class StubMarketData:
             index = min(self.position_reads - 1, len(self._option_positions_per_call) - 1)
             return self._option_positions_per_call[index]
         return self._option_positions
+
+    def quote_combo(self, symbol: str, legs: Sequence[ComboLeg]) -> ComboQuote | None:
+        """Scripted per symbol; unconfigured means the venue did not quote it.
+
+        The one double in this file that answers for an unconfigured input
+        rather than raising, and deliberately: the port promises callers must
+        cope with ``None``, so the default has to be the case they must cope
+        with. A test that wants the failure path passes ``combo_quote_error``.
+        """
+        self.combo_quoted.append((symbol, tuple(legs)))
+        if self._combo_quote_error is not None:
+            raise self._combo_quote_error
+        return self._combo_quotes.get(symbol)
 
     def quote(self, legs: Sequence[OptionLeg]) -> tuple[OptionQuote, ...]:
         """Scripted per leg. An unscripted leg raises, so no test passes by accident."""
