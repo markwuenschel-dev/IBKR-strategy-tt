@@ -256,6 +256,18 @@ def test_a_credit_spread_s_negative_quote_is_read_not_discarded():
     assert quote.width == Decimal("0.40")
 
 
+def test_ibkr_s_no_data_sentinel_is_not_read_as_a_tight_book():
+    """Caught by a live pre-flight on 2026-09-18, not by these tests.
+
+    IBKR answers ``-1`` for a price it has no data for. On a single option
+    ``_two_sided``'s ``bid < 0`` guard refuses that for free; the combo reader
+    drops that guard so credit spreads can quote negative, and so must refuse
+    the sentinel by name. Before this, ``-1 x -1`` read as a zero-width book at
+    a 1.00 credit -- a fabricated measurement, which is worse than none.
+    """
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=-1.0, ask=-1.0)) is None
+
+
 def test_a_crossed_or_absent_bag_book_is_no_quote_at_all():
     assert IBKRMarketData._combo_quote(SimpleNamespace(bid=-1.50, ask=-1.90)) is None
     assert IBKRMarketData._combo_quote(SimpleNamespace(bid=float("nan"), ask=-1.9)) is None

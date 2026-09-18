@@ -112,6 +112,14 @@ QUOTE_POLL_SECONDS = 0.25
 #: fields to wait for. Keep the two in step.
 OPEN_INTEREST_TICK = "101"
 
+#: What IBKR sends for a price it has no data for.
+#:
+#: For a single option this needs no name: ``_two_sided`` refuses a negative
+#: bid, so the sentinel falls out as "not a usable book". A combo is the case
+#: where it matters, because a credit spread's bag is *legitimately* negative
+#: on both sides -- see :meth:`IBKRMarketData._combo_quote`.
+NO_DATA = -1.0
+
 #: Extra pumping allowed once the whole batch has a two-sided book.
 #:
 #: Model greeks and open interest arrive *after* top of book, and the batch's
@@ -666,11 +674,27 @@ class IBKRMarketData:
         as a venue that declined to quote.
 
         What remains is what makes any book meaningful: two finite sides that
-        are not crossed.
+        are not crossed, and that are not IBKR's no-data sentinel.
+
+        That sentinel is the trap this docstring exists for. IBKR reports "no
+        data" on an option as ``-1``, and ``_two_sided``'s ``bid < 0`` guard
+        rejects it for free. Dropping that guard to admit negative credit
+        prices also admits the sentinel, and ``-1 x -1`` reads as a perfectly
+        tight book at a 1.00 credit -- a fabricated measurement, which is worse
+        than a missing one. A pre-flight against live TWS on 2026-09-18 returned
+        exactly that for both a held spread and a submitted one.
+
+        Only the symmetric ``-1 x -1`` is refused. A real bag quoted at exactly
+        ``-1.00`` on both sides is a locked market on a 1.00 credit: possible,
+        rare, and indistinguishable from the sentinel, so it costs one
+        measurement. An asymmetric sentinel needs no rule -- ``-1`` against any
+        real credit price is a crossed book, which is already refused below.
         """
         bid = _finite(getattr(ticker, "bid", None))
         ask = _finite(getattr(ticker, "ask", None))
         if bid is None or ask is None or ask < bid:
+            return None
+        if bid == NO_DATA and ask == NO_DATA:
             return None
         return ComboQuote(wire_bid=_price(bid), wire_ask=_price(ask))
 
