@@ -15,6 +15,12 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from ibkr_trader.scanner import STALE_TICKER_GREEKS, STALE_TICKER_VALUES
+
+#: Everything the adapter clears at subscription time, and therefore
+#: everything a double has to deliver on a pump rather than up front.
+DELIVERABLE_TICKER_FIELDS = STALE_TICKER_VALUES + STALE_TICKER_GREEKS
+
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import (
     ComboLeg,
@@ -451,3 +457,41 @@ def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
         as_of=SCAN_TIME,
         chain=tuple(wide),
     )
+
+
+class PumpedDelivery:
+    """Vendor-faithful arrival: a ticker is empty until the loop is pumped.
+
+    ``ib_async`` hands back a ``Ticker`` immediately but fills it only when the
+    event loop runs, and the adapter now blanks whatever a cached ticker was
+    carrying at subscription time (``IBKRMarketData._clear_stale``). A double
+    that returns a populated ticker straight out of ``reqMktData`` models
+    neither, and quietly gives the adapter values no real subscription could
+    have yet -- which is exactly the staleness the adapter exists to refuse.
+
+    :meth:`serve` records what a subscription will eventually deliver and
+    returns the ticker; :meth:`pump` applies it. Tests keep their original
+    ticker shapes; only the moment of arrival moves.
+    """
+
+    def __init__(self) -> None:
+        self._undelivered: list[tuple[object, dict]] = []
+
+    def serve(self, ticker):
+        self._undelivered.append(
+            (
+                ticker,
+                {
+                    name: getattr(ticker, name)
+                    for name in DELIVERABLE_TICKER_FIELDS
+                    if hasattr(ticker, name)
+                },
+            )
+        )
+        return ticker
+
+    def pump(self) -> None:
+        for ticker, values in self._undelivered:
+            for name, value in values.items():
+                setattr(ticker, name, value)
+        self._undelivered.clear()

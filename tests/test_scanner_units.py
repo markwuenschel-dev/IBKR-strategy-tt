@@ -19,7 +19,7 @@ from ibkr_trader.config import build_config
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.scanner import IBKRMarketData, _whole_contracts
 
-from .fakes import ACCOUNT, SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME, PumpedDelivery
 
 
 def adapter(ib=None, **strategy):
@@ -37,10 +37,11 @@ def adapter(ib=None, **strategy):
 # --- INT-004 -------------------------------------------------------------
 
 
-class LineCountingIB:
+class LineCountingIB(PumpedDelivery):
     """Counts market-data lines, and can fail on a chosen request or cancel."""
 
     def __init__(self, fail_request_on: int | None = None, fail_cancel_on: int | None = None):
+        super().__init__()
         self.open_lines: set[int] = set()
         self.requests = 0
         self.cancels = 0
@@ -52,7 +53,9 @@ class LineCountingIB:
         if self.requests == self._fail_request_on:
             raise RuntimeError("market data request refused")
         self.open_lines.add(id(contract))
-        return SimpleNamespace(contract=contract, bid=1.0, ask=1.1, last=1.05, close=1.0)
+        return self.serve(
+            SimpleNamespace(contract=contract, bid=1.0, ask=1.1, last=1.05, close=1.0)
+        )
 
     def cancelMktData(self, contract):
         self.cancels += 1
@@ -64,7 +67,7 @@ class LineCountingIB:
         return True
 
     def sleep(self, seconds: float) -> None:
-        return None
+        self.pump()
 
 
 def test_a_failed_request_does_not_leak_the_lines_already_opened():

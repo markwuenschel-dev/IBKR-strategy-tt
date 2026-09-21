@@ -50,7 +50,7 @@ from ibkr_trader.scanner import (
     IBKRMarketData,
 )
 
-from .fakes import ACCOUNT, SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME, PumpedDelivery
 
 # --- vendor doubles ------------------------------------------------------
 
@@ -96,7 +96,7 @@ def option_ticker(contract):
     )
 
 
-class BudgetIB:
+class BudgetIB(PumpedDelivery):
     """Records how many market-data lines are open at once, and batch sizes.
 
     ``peak`` is the number the line budget is actually about. Counting requests
@@ -105,6 +105,7 @@ class BudgetIB:
     """
 
     def __init__(self, chains=(), bars=()):
+        super().__init__()
         self._chains = list(chains)
         self._bars = list(bars)
         self.open: set[int] = set()
@@ -121,7 +122,7 @@ class BudgetIB:
         self.quote_requests += 1
         self.open.add(id(contract))
         self.peak = max(self.peak, len(self.open))
-        return option_ticker(contract)
+        return self.serve(option_ticker(contract))
 
     def cancelMktData(self, contract):
         self.cancels += 1
@@ -146,7 +147,7 @@ class BudgetIB:
         return list(self._bars)
 
     def sleep(self, seconds):
-        raise AssertionError("a healthy ticker must not need polling")
+        self.pump()
 
 
 def adapter(ib, refresh_limit=None, clock=None):
@@ -264,14 +265,14 @@ class SnapshotIB(BudgetIB):
             self.quote_requests += 1
             self.open.add(id(contract))
             self.peak = max(self.peak, len(self.open))
-            return SimpleNamespace(
+            return self.serve(SimpleNamespace(
                 contract=contract,
                 last=195.0,
                 bid=194.9,
                 ask=195.1,
                 close=190.0,
                 impliedVolatility=self._underlying_iv,
-            )
+            ))
         return super().reqMktData(contract, generic_ticks, snapshot, regulatory)
 
 
@@ -498,13 +499,17 @@ class LateFieldsIB:
 
     def reqMktData(self, contract, generic_ticks, snapshot, regulatory):
         self.open.add(id(contract))
+        # Nothing is populated at subscription time: top of book is the *first*
+        # thing to arrive, not something already there. That ordering is the
+        # whole point of this double, and pre-setting it hid the fact that a
+        # subscription which never pumps sees nothing at all.
         ticker = SimpleNamespace(
             contract=contract,
-            bid=1.00,
-            ask=1.10,
+            bid=math.nan,
+            ask=math.nan,
             modelGreeks=None,
             putOpenInterest=math.nan,
-            volume=100,
+            volume=math.nan,
         )
         self.tickers.append(ticker)
         return ticker
@@ -515,6 +520,10 @@ class LateFieldsIB:
     def sleep(self, seconds):
         self.polls += 1
         for index, ticker in enumerate(self.tickers):
+            if self.polls >= 1 + index:
+                ticker.bid = 1.00
+                ticker.ask = 1.10
+                ticker.volume = 100
             if self.polls >= self._greeks_after + index:
                 ticker.modelGreeks = SimpleNamespace(delta=-0.30)
             if self.polls >= self._oi_after + index:

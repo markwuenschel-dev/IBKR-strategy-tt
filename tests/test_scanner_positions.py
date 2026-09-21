@@ -26,7 +26,7 @@ from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import OptionLeg, Right
 from ibkr_trader.scanner import CURRENCY, EXCHANGE, IBKRMarketData
 
-from .fakes import ACCOUNT, SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME, PumpedDelivery
 from .test_scanner_quoting import FAKE_API
 
 EXPIRY = date(2026, 3, 20)
@@ -163,7 +163,7 @@ def leg(strike: str, right: Right = Right.PUT, expiry: date = EXPIRY) -> OptionL
     return OptionLeg(symbol="AAPL", expiry=expiry, strike=Decimal(strike), right=right)
 
 
-class QuoteIB:
+class QuoteIB(PumpedDelivery):
     """The client half of ``quote()``: qualify, then a line-budgeted quote.
 
     ``books`` maps a strike to ``(bid, ask)``; ``None`` means the venue never
@@ -173,6 +173,7 @@ class QuoteIB:
     """
 
     def __init__(self, books=None, qualify=None):
+        super().__init__()
         self._books = books or {}
         self._qualify = qualify
         self.qualified: list = []
@@ -198,7 +199,7 @@ class QuoteIB:
         if book is None:
             return SimpleNamespace(contract=contract, bid=math.nan, ask=math.nan)
         bid, ask = book
-        return SimpleNamespace(
+        return self.serve(SimpleNamespace(
             contract=contract,
             bid=bid,
             ask=ask,
@@ -206,13 +207,13 @@ class QuoteIB:
             putOpenInterest=500,
             callOpenInterest=700,
             volume=100,
-        )
+        ))
 
     def cancelMktData(self, contract):
         self.open.discard(id(contract))
 
     def sleep(self, _seconds):
-        return None
+        self.pump()
 
 
 def test_quotes_come_back_one_per_leg_in_the_order_asked():
