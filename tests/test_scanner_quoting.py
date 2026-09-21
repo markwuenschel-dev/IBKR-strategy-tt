@@ -265,14 +265,16 @@ class SnapshotIB(BudgetIB):
             self.quote_requests += 1
             self.open.add(id(contract))
             self.peak = max(self.peak, len(self.open))
-            return self.serve(SimpleNamespace(
-                contract=contract,
-                last=195.0,
-                bid=194.9,
-                ask=195.1,
-                close=190.0,
-                impliedVolatility=self._underlying_iv,
-            ))
+            return self.serve(
+                SimpleNamespace(
+                    contract=contract,
+                    last=195.0,
+                    bid=194.9,
+                    ask=195.1,
+                    close=190.0,
+                    impliedVolatility=self._underlying_iv,
+                )
+            )
         return super().reqMktData(contract, generic_ticks, snapshot, regulatory)
 
 

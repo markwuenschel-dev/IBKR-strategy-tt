@@ -199,15 +199,17 @@ class QuoteIB(PumpedDelivery):
         if book is None:
             return SimpleNamespace(contract=contract, bid=math.nan, ask=math.nan)
         bid, ask = book
-        return self.serve(SimpleNamespace(
-            contract=contract,
-            bid=bid,
-            ask=ask,
-            modelGreeks=SimpleNamespace(delta=-0.30),
-            putOpenInterest=500,
-            callOpenInterest=700,
-            volume=100,
-        ))
+        return self.serve(
+            SimpleNamespace(
+                contract=contract,
+                bid=bid,
+                ask=ask,
+                modelGreeks=SimpleNamespace(delta=-0.30),
+                putOpenInterest=500,
+                callOpenInterest=700,
+                volume=100,
+            )
+        )
 
     def cancelMktData(self, contract):
         self.open.discard(id(contract))
