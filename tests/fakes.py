@@ -15,12 +15,6 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from ibkr_trader.scanner import STALE_TICKER_GREEKS, STALE_TICKER_VALUES
-
-#: Everything the adapter clears at subscription time, and therefore
-#: everything a double has to deliver on a pump rather than up front.
-DELIVERABLE_TICKER_FIELDS = STALE_TICKER_VALUES + STALE_TICKER_GREEKS
-
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import (
     ComboLeg,
@@ -39,6 +33,11 @@ from ibkr_trader.models import (
     Right,
     TradeProposal,
 )
+from ibkr_trader.scanner import STALE_TICKER_GREEKS, STALE_TICKER_VALUES
+
+#: Everything the adapter clears at subscription time, and therefore
+#: everything a double has to deliver on a pump rather than up front.
+DELIVERABLE_TICKER_FIELDS = STALE_TICKER_VALUES + STALE_TICKER_GREEKS
 
 
 def quote(

@@ -109,7 +109,7 @@ class CachingIB:
         self._pumped: dict[int, int] = {}
         self._pending: dict[int, float] = {}
 
-    def reqMktData(self, contract, generic_ticks, snapshot, regulatory):
+    def reqMktData(self, contract, _generic_ticks, _snapshot, _regulatory):
         con_id = contract.conId
         self.subscriptions += 1
         ticker = self.tickers.get(con_id)
@@ -139,7 +139,7 @@ class CachingIB:
         self.open.discard(contract.conId)
         self._live.discard(contract.conId)
 
-    def sleep(self, seconds):
+    def sleep(self, _seconds):
         self.polls += 1
         for con_id in list(self._live):
             self._pumped[con_id] += 1
