@@ -56,8 +56,35 @@ def _round_credit(value: Decimal) -> Decimal:
     return value.quantize(TICK, rounding=ROUND_DOWN)
 
 
+def _is_monthly(expiry: date) -> bool:
+    """Whether ``expiry`` is a standard monthly -- the third Friday.
+
+    The third Friday is the only Friday landing on the 15th through the 21st,
+    so the test needs no calendar walk.
+
+    Holiday-shifted monthlies -- where the exchange moves expiration to the
+    preceding Thursday -- are not recognised, and deliberately so: accepting
+    any Thursday in that window would also match a weekly on products that list
+    them. A month whose monthly is missed simply falls back to the
+    nearest-to-target rule below, which is the behaviour that shipped before
+    this function existed.
+    """
+    return expiry.weekday() == 4 and 15 <= expiry.day <= 21
+
+
 def _select_expiry(snapshot: MarketSnapshot, strategy: StrategyConfig) -> date | None:
-    """Pick the expiry closest to the target DTE within the allowed band.
+    """Pick an expiry in the allowed band, preferring monthlies.
+
+    Monthlies first, nearest ``target_dte`` second. Distance alone is the wrong
+    rule: the monthly is rarely the expiry closest to 45 days, so sorting on
+    distance picked a weekly on almost every chain. Weeklies carry materially
+    wider markets on single names, and this strategy sells out-of-the-money
+    puts where that width is worst -- so the ordering was quietly choosing the
+    least liquid expiry available and then judging the result on liquidity.
+
+    The preference is not a requirement. A band with no monthly in it -- a
+    short band, or a holiday-shifted month -- falls back to every expiry and
+    the original nearest-to-target rule, rather than refusing the symbol.
 
     Ties break toward the nearer expiry, so selection is deterministic for any
     chain rather than dependent on dictionary or exchange ordering.
@@ -75,8 +102,9 @@ def _select_expiry(snapshot: MarketSnapshot, strategy: StrategyConfig) -> date |
     ]
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (abs(item[1] - strategy.target_dte), item[1]))
-    return candidates[0][0]
+    preferred = [item for item in candidates if _is_monthly(item[0])] or candidates
+    preferred.sort(key=lambda item: (abs(item[1] - strategy.target_dte), item[1]))
+    return preferred[0][0]
 
 
 def _rank_short_puts(
@@ -129,14 +157,26 @@ def _liquidity_failure(quote: OptionQuote, strategy: StrategyConfig) -> str | No
     """Return why this leg is untradable, or None when it passes.
 
     Checked per leg, because a spread is only as fillable as its worse side.
+
+    Bid/ask *width* is deliberately not a gate. It was one -- a per-leg
+    ``spread_pct > max_spread_pct`` test -- and across five live scans it
+    refused 43.7% of every symbol that reached it, more than every other
+    qualification rule combined. The bar had no provenance in the mechanics
+    this module implements, and as a percentage of mid it is hardest on exactly
+    the cheap out-of-the-money puts this strategy sells: a nickel wide on a
+    dollar option reads as 5% on a $20 option and 25% here, for the same
+    absolute cost to cross.
+
+    Width still informs the decision twice over, which is where a preference
+    belongs rather than a cliff: ``ranking`` orders candidates by mean leg
+    width, so a tight book wins a slot ahead of a wide one, and the width is in
+    the leg payload the reviewer sees and can refuse on.
+
+    What remains here is what makes a quote meaningful at all -- a real bid,
+    and the open-interest and volume floors.
     """
     if quote.bid <= 0:
         return f"{quote.strike} put has no bid"
-    if quote.spread_pct > strategy.max_spread_pct:
-        return (
-            f"{quote.strike} put bid/ask spread is {quote.spread_pct:.1%} of mid, "
-            f"above the {strategy.max_spread_pct:.1%} limit"
-        )
     if quote.open_interest < strategy.min_open_interest:
         return (
             f"{quote.strike} put open interest {quote.open_interest} "

@@ -24,7 +24,9 @@ from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from .models import (
+    ComboLeg,
     ComboOrder,
+    ComboQuote,
     ExecutionResult,
     ManagementAction,
     MarketSnapshot,
@@ -75,6 +77,26 @@ class MarketData(Protocol):
 
         Raises:
             MarketDataError: a leg could not be qualified or quoted at all.
+        """
+        ...
+
+    def quote_combo(self, symbol: str, legs: Sequence[ComboLeg]) -> ComboQuote | None:
+        """The spread's own market, or ``None`` when the venue did not quote it.
+
+        A multi-leg order is filled against the combo's book, not against the
+        legs' books, and the two differ: the bag has its own quote and its own
+        price-improvement auction. Every pricing number in this codebase is
+        derived from legs, which makes this the one measurement that can say
+        whether a resting limit was ever near the market.
+
+        ``None`` rather than an exception, and no dead-book fallback: this is
+        instrumentation, and a venue that declines to quote a bag must cost a
+        measurement, never a trade. Callers are required to proceed without it.
+        Implementations that cannot resolve the legs at all may still raise.
+
+        Raises:
+            MarketDataError: the legs could not be qualified, so no bag could
+                be formed to ask about.
         """
         ...
 

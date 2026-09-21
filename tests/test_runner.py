@@ -20,6 +20,7 @@ from ibkr_trader.clock import FixedClock
 from ibkr_trader.errors import MarketDataError, SubmissionFailed
 from ibkr_trader.models import (
     Action,
+    ComboQuote,
     NoTrade,
     Outcome,
     Portfolio,
@@ -27,7 +28,9 @@ from ibkr_trader.models import (
     ProposalLeg,
     Right,
     TradeProposal,
+    opening_combo_legs,
 )
+from ibkr_trader.store import SqliteStore
 
 from .fakes import (
     GOOD_EXPIRY,
@@ -38,6 +41,109 @@ from .fakes import (
     tradable_snapshot,
 )
 from .harness import build_runner
+
+
+class SlowMarket(StubMarketData):
+    """A market whose every quote costs the injected clock real time.
+
+    The suite's doubles are instantaneous, which is precisely why a scheduling
+    bug measured in pass duration could not be caught: with a zero-length pass,
+    sleeping *after* it and sleeping *until the next period* are the same thing.
+    """
+
+    def __init__(self, snapshots, clock, seconds):
+        super().__init__(snapshots)
+        self._test_clock = clock
+        self._test_seconds = seconds
+
+    def snapshot(self, symbol):
+        self._test_clock.advance(self._test_seconds)
+        return super().snapshot(symbol)
+
+
+class TimestampingStore(SqliteStore):
+    """Records the injected clock at the start of every run, scan or manage."""
+
+    def __init__(self, path, clock):
+        super().__init__(path, clock=clock)
+        self.run_starts = []
+
+    def start_run(self, **kwargs):
+        self.run_starts.append(self._clock.now())
+        return super().start_run(**kwargs)
+
+
+def test_scans_start_one_interval_apart_not_one_interval_after_the_last_one_ended(tmp_path):
+    """45 minutes between scans means scans *start* 45 minutes apart.
+
+    Sleeping the whole interval after a pass made the real cycle
+    ``pass_duration + interval``, so a 15-minute pass on a 45-minute interval
+    began a scan every hour.
+    """
+    clock = FixedClock(SCAN_TIME)
+    market = SlowMarket({"AAPL": tradable_snapshot("AAPL")}, clock, 20.0)
+    store = TimestampingStore(tmp_path / "periods.sqlite3", clock)
+    runner, _, _, _, _ = build_runner(
+        tmp_path,
+        market=market,
+        clock=clock,
+        store=store,
+        overrides={"scan_interval_seconds": 300.0, "manage_interval_seconds": 1000.0},
+    )
+
+    runner.run_while(lambda: True, max_passes=3)
+
+    gaps = [
+        (b - a).total_seconds()
+        for a, b in zip(store.run_starts, store.run_starts[1:], strict=False)
+    ]
+    assert gaps == [300.0, 300.0], "the period must not drift by the pass duration"
+
+
+def test_management_passes_fill_the_wait_when_the_book_has_something_in_it(tmp_path):
+    """A resting order should be looked at more often than the scan cadence.
+
+    The scan is expensive and infrequent; reconciling a fill and resting its
+    profit target is cheap and wants to happen soon after the fill.
+    """
+    clock = FixedClock(SCAN_TIME)
+    market = StubMarketData({"AAPL": tradable_snapshot("AAPL")})
+    store = TimestampingStore(tmp_path / "cadence.sqlite3", clock)
+    runner, _, _, _, _ = build_runner(
+        tmp_path,
+        market=market,
+        clock=clock,
+        store=store,
+        overrides={"scan_interval_seconds": 300.0, "manage_interval_seconds": 100.0},
+    )
+
+    runner.run_while(lambda: True, max_passes=1)
+
+    # One scan at t0, then a management pass at each interval inside the wait.
+    offsets = [(t - store.run_starts[0]).total_seconds() for t in store.run_starts]
+    assert offsets == [0.0, 100.0, 200.0]
+
+
+def test_no_management_pass_runs_while_there_is_nothing_to_manage(tmp_path):
+    """An empty book must cost nothing between scans.
+
+    ``StubMarketData`` raises for an unconfigured symbol, so this pass records
+    an error and never submits -- leaving no spread and no opening order.
+    """
+    clock = FixedClock(SCAN_TIME)
+    store = TimestampingStore(tmp_path / "idle.sqlite3", clock)
+    runner, _, _, _, _ = build_runner(
+        tmp_path,
+        market=StubMarketData(),
+        clock=clock,
+        store=store,
+        overrides={"scan_interval_seconds": 300.0, "manage_interval_seconds": 100.0},
+    )
+
+    runner.run_while(lambda: True, max_passes=1)
+
+    assert len(store.run_starts) == 1, "only the scan; nothing to manage"
+    assert sum(clock.slept) == 300.0, "still waits the full interval"
 
 
 def test_repeat_scanning_needs_no_scheduler(tmp_path):
@@ -619,3 +725,80 @@ def test_the_real_algorithm_sizes_later_symbols_against_what_is_left(tmp_path):
     ]
     assert "on re-quote" in summary.results[2].detail
     assert "buying power 0" in summary.results[2].detail
+
+
+# --- the bag's own market, recorded before review ----------------------------
+
+
+def test_the_reviewer_sees_where_the_spread_itself_is_quoted(tmp_path):
+    """Every price this engine computes comes from leg arithmetic; a combo fills
+    against the bag's own book. Recording it is what makes an unfilled order
+    diagnosable afterwards."""
+    market = StubMarketData(
+        {"AAPL": tradable_snapshot("AAPL")},
+        # Wire prices are what is *paid* for the bag, so a credit spread is
+        # negative on both sides: crossing here collects 1.50.
+        combo_quotes={
+            "AAPL": ComboQuote(wire_bid=Decimal("-1.90"), wire_ask=Decimal("-1.50"))
+        },
+    )
+    runner, _, reviewer, _, _ = build_runner(tmp_path, market=market)
+
+    summary = runner.run_once()
+
+    (reviewed,) = reviewer.reviewed
+    assert reviewed.criteria["combo_market"] == (
+        "bag quotes 1.50 to 1.90 credit, mid 1.70; "
+        "our limit 1.75 is 0.25 above the marketable credit"
+    )
+    assert summary.results[0].outcome is Outcome.FILLED
+
+
+def test_the_quoted_bag_is_the_bag_that_gets_submitted(tmp_path):
+    """A quote of a *different* spread would be worse than no quote: it would
+    read as evidence. The legs asked about are the legs transmitted."""
+    market = StubMarketData(
+        {"AAPL": tradable_snapshot("AAPL")},
+        combo_quotes={
+            "AAPL": ComboQuote(wire_bid=Decimal("-1.90"), wire_ask=Decimal("-1.50"))
+        },
+    )
+    runner, _, _, broker, _ = build_runner(tmp_path, market=market)
+
+    runner.run_once()
+
+    (symbol, quoted_legs) = market.combo_quoted[0]
+    (submitted,) = broker.submitted
+    assert symbol == submitted.symbol
+    assert quoted_legs == opening_combo_legs(submitted)
+
+
+def test_a_bag_the_venue_will_not_quote_still_trades(tmp_path):
+    """The default case, and the one that must not become a refusal path."""
+    runner, _, reviewer, broker, _ = build_runner(
+        tmp_path, market=StubMarketData({"AAPL": tradable_snapshot("AAPL")})
+    )
+
+    summary = runner.run_once()
+
+    (reviewed,) = reviewer.reviewed
+    assert reviewed.criteria["combo_market"] == "not quoted by the venue"
+    assert len(broker.submitted) == 1
+    assert summary.results[0].outcome is Outcome.FILLED
+
+
+def test_a_failed_combo_quote_never_costs_a_reviewed_trade(tmp_path):
+    """Instrumentation failing must be indistinguishable, to the trade, from
+    instrumentation being absent."""
+    market = StubMarketData(
+        {"AAPL": tradable_snapshot("AAPL")},
+        combo_quote_error=MarketDataError("no market data line available"),
+    )
+    runner, _, reviewer, broker, _ = build_runner(tmp_path, market=market)
+
+    summary = runner.run_once()
+
+    (reviewed,) = reviewer.reviewed
+    assert "combo_market" not in reviewed.criteria
+    assert len(broker.submitted) == 1
+    assert summary.results[0].outcome is Outcome.FILLED

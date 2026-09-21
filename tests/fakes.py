@@ -17,7 +17,9 @@ from decimal import Decimal
 
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.models import (
+    ComboLeg,
     ComboOrder,
+    ComboQuote,
     ExecutionResult,
     Fill,
     MarketSnapshot,
@@ -31,6 +33,11 @@ from ibkr_trader.models import (
     Right,
     TradeProposal,
 )
+from ibkr_trader.scanner import STALE_TICKER_GREEKS, STALE_TICKER_VALUES
+
+#: Everything the adapter clears at subscription time, and therefore
+#: everything a double has to deliver on a pump rather than up front.
+DELIVERABLE_TICKER_FIELDS = STALE_TICKER_VALUES + STALE_TICKER_GREEKS
 
 
 def quote(
@@ -85,6 +92,8 @@ class StubMarketData:
         option_positions_per_call: Sequence[Sequence[OptionPosition]] | None = None,
         option_positions_error: Exception | None = None,
         quotes: dict[OptionLeg, OptionQuote] | None = None,
+        combo_quotes: dict[str, ComboQuote | None] | None = None,
+        combo_quote_error: Exception | None = None,
     ) -> None:
         self._snapshots = snapshots or {}
         self._failures = failures or {}
@@ -102,6 +111,12 @@ class StubMarketData:
         )
         self._option_positions_error = option_positions_error
         self._quotes = dict(quotes or {})
+        #: Bag quotes per symbol. An unconfigured symbol is quoted ``None`` --
+        #: the venue declining to quote the combo -- because that is the
+        #: default every existing test needs: instrumentation that is absent
+        #: must change nothing about what they assert.
+        self._combo_quotes = dict(combo_quotes or {})
+        self._combo_quote_error = combo_quote_error
         #: Every symbol asked for, in order, repeats included. The runner quotes
         #: a symbol once during the scan and again before submitting it, so a
         #: test can read which symbols reached submission from this alone.
@@ -110,6 +125,8 @@ class StubMarketData:
         self.position_reads = 0
         #: Every leg list the manager asked to quote, in order.
         self.quoted: list[tuple[OptionLeg, ...]] = []
+        #: Every bag asked about, as ``(symbol, legs)``, in order.
+        self.combo_quoted: list[tuple[str, tuple[ComboLeg, ...]]] = []
 
     def snapshot(self, symbol: str) -> MarketSnapshot:
         """Serve the configured snapshot; from the second request, the re-quote.
@@ -158,6 +175,19 @@ class StubMarketData:
             index = min(self.position_reads - 1, len(self._option_positions_per_call) - 1)
             return self._option_positions_per_call[index]
         return self._option_positions
+
+    def quote_combo(self, symbol: str, legs: Sequence[ComboLeg]) -> ComboQuote | None:
+        """Scripted per symbol; unconfigured means the venue did not quote it.
+
+        The one double in this file that answers for an unconfigured input
+        rather than raising, and deliberately: the port promises callers must
+        cope with ``None``, so the default has to be the case they must cope
+        with. A test that wants the failure path passes ``combo_quote_error``.
+        """
+        self.combo_quoted.append((symbol, tuple(legs)))
+        if self._combo_quote_error is not None:
+            raise self._combo_quote_error
+        return self._combo_quotes.get(symbol)
 
     def quote(self, legs: Sequence[OptionLeg]) -> tuple[OptionQuote, ...]:
         """Scripted per leg. An unscripted leg raises, so no test passes by accident."""
@@ -404,14 +434,20 @@ def tradable_snapshot(symbol: str = "AAPL", iv_rank: float = 45.0) -> MarketSnap
 
 
 def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
-    """A snapshot where the right strikes exist but the market is unusably wide.
+    """A snapshot where the right strikes exist but nothing is tradable there.
 
     Verifies that "no trade" comes from the liquidity screen rather than from an
     absent chain.
+
+    Illiquidity is expressed as open interest of 1 against the default 100
+    minimum. It used to be an unusably wide bid/ask, which stopped meaning
+    anything when the width gate was removed -- and a fixture that quietly
+    starts trading is worse than one that fails, so this states the condition in
+    terms of a screen that still exists.
     """
     wide = [
-        quote(symbol, GOOD_EXPIRY, "185", Right.PUT, "2.00", "4.80", -0.30),
-        quote(symbol, GOOD_EXPIRY, "180", Right.PUT, "0.40", "2.90", -0.20),
+        quote(symbol, GOOD_EXPIRY, "185", Right.PUT, "2.00", "4.80", -0.30, open_interest=1),
+        quote(symbol, GOOD_EXPIRY, "180", Right.PUT, "0.40", "2.90", -0.20, open_interest=1),
     ]
     return MarketSnapshot(
         symbol=symbol,
@@ -420,3 +456,41 @@ def illiquid_snapshot(symbol: str = "XYZ") -> MarketSnapshot:
         as_of=SCAN_TIME,
         chain=tuple(wide),
     )
+
+
+class PumpedDelivery:
+    """Vendor-faithful arrival: a ticker is empty until the loop is pumped.
+
+    ``ib_async`` hands back a ``Ticker`` immediately but fills it only when the
+    event loop runs, and the adapter now blanks whatever a cached ticker was
+    carrying at subscription time (``IBKRMarketData._clear_stale``). A double
+    that returns a populated ticker straight out of ``reqMktData`` models
+    neither, and quietly gives the adapter values no real subscription could
+    have yet -- which is exactly the staleness the adapter exists to refuse.
+
+    :meth:`serve` records what a subscription will eventually deliver and
+    returns the ticker; :meth:`pump` applies it. Tests keep their original
+    ticker shapes; only the moment of arrival moves.
+    """
+
+    def __init__(self) -> None:
+        self._undelivered: list[tuple[object, dict]] = []
+
+    def serve(self, ticker):
+        self._undelivered.append(
+            (
+                ticker,
+                {
+                    name: getattr(ticker, name)
+                    for name in DELIVERABLE_TICKER_FIELDS
+                    if hasattr(ticker, name)
+                },
+            )
+        )
+        return ticker
+
+    def pump(self) -> None:
+        for ticker, values in self._undelivered:
+            for name, value in values.items():
+                setattr(ticker, name, value)
+        self._undelivered.clear()

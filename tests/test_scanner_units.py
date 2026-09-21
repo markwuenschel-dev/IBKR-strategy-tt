@@ -19,7 +19,7 @@ from ibkr_trader.config import build_config
 from ibkr_trader.errors import MarketDataError
 from ibkr_trader.scanner import IBKRMarketData, _whole_contracts
 
-from .fakes import ACCOUNT, SCAN_TIME
+from .fakes import ACCOUNT, SCAN_TIME, PumpedDelivery
 
 
 def adapter(ib=None, **strategy):
@@ -37,10 +37,11 @@ def adapter(ib=None, **strategy):
 # --- INT-004 -------------------------------------------------------------
 
 
-class LineCountingIB:
+class LineCountingIB(PumpedDelivery):
     """Counts market-data lines, and can fail on a chosen request or cancel."""
 
     def __init__(self, fail_request_on: int | None = None, fail_cancel_on: int | None = None):
+        super().__init__()
         self.open_lines: set[int] = set()
         self.requests = 0
         self.cancels = 0
@@ -52,7 +53,9 @@ class LineCountingIB:
         if self.requests == self._fail_request_on:
             raise RuntimeError("market data request refused")
         self.open_lines.add(id(contract))
-        return SimpleNamespace(contract=contract, bid=1.0, ask=1.1, last=1.05, close=1.0)
+        return self.serve(
+            SimpleNamespace(contract=contract, bid=1.0, ask=1.1, last=1.05, close=1.0)
+        )
 
     def cancelMktData(self, contract):
         self.cancels += 1
@@ -64,7 +67,7 @@ class LineCountingIB:
         return True
 
     def sleep(self, seconds: float) -> None:
-        return None
+        self.pump()
 
 
 def test_a_failed_request_does_not_leak_the_lines_already_opened():
@@ -232,3 +235,51 @@ def test_a_fractional_position_is_not_truncated_out_of_existence(reported, expec
     this number is read to answer, while leaving whole sizes untouched.
     """
     assert _whole_contracts(reported) == expected
+
+
+# --- the bag's own quote -----------------------------------------------------
+
+
+def test_a_credit_spread_s_negative_quote_is_read_not_discarded():
+    """The trap this helper exists to avoid.
+
+    ``_two_sided`` -- the reader for a single option -- requires a non-negative
+    bid and a positive ask. A credit spread's bag is quoted in prices *paid*,
+    so it is negative on both sides, and reusing that reader would have thrown
+    every credit spread's quote away as malformed. Silently: the caller cannot
+    tell a discarded quote from a venue that declined to quote.
+    """
+    ticker = SimpleNamespace(bid=-1.90, ask=-1.50)
+
+    quote = IBKRMarketData._combo_quote(ticker)
+
+    assert quote is not None
+    assert quote.marketable_credit == Decimal("1.50"), "crossing collects the lower credit"
+    assert quote.credit_mid == Decimal("1.70")
+    assert quote.width == Decimal("0.40")
+
+
+def test_ibkr_s_no_data_sentinel_is_not_read_as_a_tight_book():
+    """Caught by a live pre-flight on 2026-09-18, not by these tests.
+
+    IBKR answers ``-1`` for a price it has no data for. On a single option
+    ``_two_sided``'s ``bid < 0`` guard refuses that for free; the combo reader
+    drops that guard so credit spreads can quote negative, and so must refuse
+    the sentinel by name. Before this, ``-1 x -1`` read as a zero-width book at
+    a 1.00 credit -- a fabricated measurement, which is worse than none.
+    """
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=-1.0, ask=-1.0)) is None
+
+
+def test_a_crossed_or_absent_bag_book_is_no_quote_at_all():
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=-1.50, ask=-1.90)) is None
+    assert IBKRMarketData._combo_quote(SimpleNamespace(bid=float("nan"), ask=-1.9)) is None
+    assert IBKRMarketData._combo_quote(SimpleNamespace()) is None
+
+
+def test_a_debit_spread_quote_still_reads_correctly():
+    """Nothing here assumes the credit direction; a debit bag quotes positive."""
+    quote = IBKRMarketData._combo_quote(SimpleNamespace(bid=1.50, ask=1.90))
+
+    assert quote.marketable_credit == Decimal("-1.90"), "paying 1.90 is a negative credit"
+    assert quote.credit_mid == Decimal("-1.70")

@@ -46,8 +46,101 @@ def snapshot_from(*quotes, as_of: datetime = SCAN_TIME) -> MarketSnapshot:
     )
 
 
-def put(strike: str, bid: str, ask: str, delta: float, open_interest: int = 500):
-    return quote("AAPL", GOOD_EXPIRY, strike, Right.PUT, bid, ask, delta, open_interest)
+def put(
+    strike: str,
+    bid: str,
+    ask: str,
+    delta: float,
+    open_interest: int = 500,
+    expiry: date = GOOD_EXPIRY,
+):
+    return quote("AAPL", expiry, strike, Right.PUT, bid, ask, delta, open_interest)
+
+
+#: The third Friday of February 2026: 36 DTE from ``SCAN_TIME``, inside the
+#: 30-60 band, and 9 days further from the 45-day target than ``GOOD_EXPIRY``.
+#: This is the real shape of the problem -- on any given day the monthly is
+#: rarely the expiry closest to 45 days.
+MONTHLY_EXPIRY = date(2026, 2, 20)
+#: A Friday that is not a third Friday: 43 DTE, nearer the target than the
+#: monthly and still not what Tastytrade mechanics would trade.
+WEEKLY_EXPIRY = date(2026, 2, 27)
+
+
+def ladder(expiry: date):
+    """A tradable 185/180 pair on ``expiry``: 1.70 credit on a 5-wide spread."""
+    return (
+        put("185", "3.35", "3.45", -0.30, expiry=expiry),
+        put("180", "1.65", "1.75", -0.20, expiry=expiry),
+    )
+
+
+def test_the_monthly_expiry_is_preferred_over_an_expiry_nearer_the_target(config):
+    """Tastytrade trades monthlies; the weekly nearer 45 days is not the answer.
+
+    ``GOOD_EXPIRY`` is 45 DTE -- an exact hit on ``target_dte`` -- while the
+    February monthly is 36. Sorting on distance alone therefore picks the
+    weekly every time the monthly is not sitting on the target, which is most
+    days. Weeklies carry materially wider markets on single names, so this one
+    ordering choice was feeding the liquidity problem it then screened on.
+    """
+    snapshot = snapshot_from(*ladder(MONTHLY_EXPIRY), *ladder(GOOD_EXPIRY))
+
+    decision = evaluate("AAPL", snapshot, ample(), config.strategy, config.risk, NOW)
+
+    assert isinstance(decision, TradeProposal), getattr(decision, "reason", decision)
+    assert decision.expiry == MONTHLY_EXPIRY, "the monthly, not the closer weekly"
+
+
+def test_a_weekly_is_used_when_no_monthly_falls_inside_the_band(config):
+    """Preference, not requirement: an empty monthly pool must not refuse.
+
+    Neither 2026-02-27 nor ``GOOD_EXPIRY`` is a third Friday, so the original
+    nearest-to-target rule applies unchanged and picks the 45-DTE one.
+    """
+    snapshot = snapshot_from(*ladder(WEEKLY_EXPIRY), *ladder(GOOD_EXPIRY))
+
+    decision = evaluate("AAPL", snapshot, ample(), config.strategy, config.risk, NOW)
+
+    assert isinstance(decision, TradeProposal), getattr(decision, "reason", decision)
+    assert decision.expiry == GOOD_EXPIRY
+
+
+def test_a_wide_book_is_ranked_and_reviewed_rather_than_refused(config):
+    """``max_spread_pct`` is gone; liquidity is a preference, not a gate.
+
+    Short 185 is 3.00/3.80 -- a 23.5% spread, formerly refused outright by the
+    10% limit. It has a real bid, 500 open interest, and pays 1.70 on a 5-wide
+    spread, so nothing about it is untradable. Width still reaches the ranker
+    (``ranking.py`` orders on it) and the reviewer (it is in the leg payload),
+    which is where a preference belongs.
+    """
+    snapshot = snapshot_from(
+        put("185", "3.00", "3.80", -0.30),
+        put("180", "1.30", "2.10", -0.20),
+    )
+
+    decision = evaluate("AAPL", snapshot, ample(), config.strategy, config.risk, NOW)
+
+    assert isinstance(decision, TradeProposal), getattr(decision, "reason", decision)
+    assert [leg.strike for leg in decision.legs] == [Decimal(185), Decimal(180)]
+    assert decision.limit_price == Decimal("1.70")
+
+
+def test_a_leg_with_no_bid_is_still_refused(config):
+    """Removing the width gate must not admit a book nobody is quoting.
+
+    ``bid <= 0`` stays: it is the check that makes a mid meaningful at all.
+    """
+    snapshot = snapshot_from(
+        put("185", "0.00", "3.80", -0.30),
+        put("180", "1.30", "2.10", -0.20),
+    )
+
+    decision = evaluate("AAPL", snapshot, ample(), config.strategy, config.risk, NOW)
+
+    assert isinstance(decision, NoTrade)
+    assert "no bid" in decision.reason
 
 
 def ample() -> Portfolio:

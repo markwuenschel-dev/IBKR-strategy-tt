@@ -56,11 +56,14 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
+from .bag import bag_contract
 from .clock import Clock, market_date
 from .config import IBKRConfig, StrategyConfig
 from .errors import MarketDataError
 from .models import (
     CONTRACT_MULTIPLIER,
+    ComboLeg,
+    ComboQuote,
     MarketSnapshot,
     OptionLeg,
     OptionPosition,
@@ -109,6 +112,14 @@ QUOTE_POLL_SECONDS = 0.25
 #: fields to wait for. Keep the two in step.
 OPEN_INTEREST_TICK = "101"
 
+#: What IBKR sends for a price it has no data for.
+#:
+#: For a single option this needs no name: ``_two_sided`` refuses a negative
+#: bid, so the sentinel falls out as "not a usable book". A combo is the case
+#: where it matters, because a credit spread's bag is *legitimately* negative
+#: on both sides -- see :meth:`IBKRMarketData._combo_quote`.
+NO_DATA = -1.0
+
 #: Extra pumping allowed once the whole batch has a two-sided book.
 #:
 #: Model greeks and open interest arrive *after* top of book, and the batch's
@@ -121,6 +132,46 @@ OPEN_INTEREST_TICK = "101"
 #: still never take longer than it does today. A strike that simply never
 #: reports open interest therefore costs this window, not the whole budget.
 GREEKS_WAIT_SECONDS = 2.0
+
+#: Ticker fields a new subscription must never inherit from an older one.
+#:
+#: ``ib_async`` keeps one :class:`Ticker` per contract, keyed by
+#: ``hash(contract)`` -- which for a non-BAG contract *is* the ``conId``.
+#: ``Wrapper.startTicker`` hands back the existing object when one is present,
+#: and ``Wrapper.endTicker`` unhooks only the request mappings: it never drops
+#: the ticker and never clears a field. So every value a subscription writes
+#: outlives its own cancellation and is visible to the next subscription on
+#: that contract, indistinguishable from a fresh quote.
+#:
+#: That is not a theoretical concern. Across the 2026-09-17 and 2026-09-18
+#: sessions, 792 of 913 underlying subscriptions were a request immediately
+#: followed by its own cancel with no packet in between -- the wait satisfied
+#: on iteration zero by the previous pass's book -- so every underlying price
+#: after the first pass was the first pass's price, by then hours old.
+#:
+#: Clearing at subscription time restores the invariant the screens assume:
+#: a field that reads as present was delivered *for this observation*. A field
+#: that never arrives is then honestly absent, and the contract is dropped by
+#: :meth:`_two_sided` rather than screened on a stale number.
+STALE_TICKER_VALUES = (
+    "bid",
+    "ask",
+    "last",
+    "close",
+    "volume",
+    "bidSize",
+    "askSize",
+    "lastSize",
+    "putOpenInterest",
+    "callOpenInterest",
+    "impliedVolatility",
+)
+
+#: Greek groups, cleared alongside :data:`STALE_TICKER_VALUES`. Separate only
+#: because they are objects rather than numbers -- ``_model_delta`` selects the
+#: *object* first, so a stale ``modelGreeks`` suppresses the ``lastGreeks``
+#: fallback as well as supplying an old delta.
+STALE_TICKER_GREEKS = ("modelGreeks", "lastGreeks", "bidGreeks", "askGreeks")
 
 #: Strike window above spot, as a fraction of the underlying price.
 #:
@@ -614,6 +665,78 @@ class IBKRMarketData:
         return tuple(
             self._leg_quote(leg, ticker) for leg, ticker in zip(wanted, tickers, strict=True)
         )
+
+    def quote_combo(self, symbol: str, legs: Sequence[ComboLeg]) -> ComboQuote | None:
+        """The bag's own market, or None when the venue did not quote it.
+
+        The legs are qualified and assembled through :func:`bag.bag_contract`,
+        the same constructor the broker transmits with, so the book measured
+        here is the book the order would meet.
+
+        No generic ticks: a bag reports no open interest, no volume and no
+        greeks, so asking for them would spend the grace window in
+        :meth:`_await_quotes` waiting for fields that never arrive.
+
+        Raises:
+            MarketDataError: the legs could not be qualified, or the
+                market-data request itself failed.
+        """
+        wanted = tuple(legs)
+        if not wanted:
+            return None
+        ib = self._client()
+        api = self._require_api()
+
+        option_legs = [combo_leg.leg for combo_leg in wanted]
+        contracts = [self._leg_contract(api, leg) for leg in option_legs]
+        resolved = self._qualify_legs(ib, option_legs, contracts)
+        con_ids = [int(getattr(contract, "conId", 0) or 0) for contract in resolved]
+        try:
+            bag = bag_contract(api, symbol, wanted, con_ids, EXCHANGE, CURRENCY)
+        except ValueError as exc:
+            raise MarketDataError(f"cannot form a {symbol} bag to quote: {exc}") from exc
+
+        self._apply_market_data_type(ib)
+        tickers = self._quote_batches(ib, [bag], "")
+        if not tickers:
+            return None
+        return self._combo_quote(tickers[0])
+
+    @staticmethod
+    def _combo_quote(ticker: Any) -> ComboQuote | None:
+        """One bag ticker as a :class:`ComboQuote`, or None for an unusable book.
+
+        Deliberately *not* :meth:`_two_sided`, which requires a non-negative bid
+        and a positive ask. Those bounds are right for a single option and wrong
+        here: a credit spread's bag quotes negative on both sides, because the
+        wire price is what is *paid* for the bag. Reusing the leg reader would
+        have discarded every credit spread's quote as malformed -- and silently,
+        as a venue that declined to quote.
+
+        What remains is what makes any book meaningful: two finite sides that
+        are not crossed, and that are not IBKR's no-data sentinel.
+
+        That sentinel is the trap this docstring exists for. IBKR reports "no
+        data" on an option as ``-1``, and ``_two_sided``'s ``bid < 0`` guard
+        rejects it for free. Dropping that guard to admit negative credit
+        prices also admits the sentinel, and ``-1 x -1`` reads as a perfectly
+        tight book at a 1.00 credit -- a fabricated measurement, which is worse
+        than a missing one. A pre-flight against live TWS on 2026-09-18 returned
+        exactly that for both a held spread and a submitted one.
+
+        Only the symmetric ``-1 x -1`` is refused. A real bag quoted at exactly
+        ``-1.00`` on both sides is a locked market on a 1.00 credit: possible,
+        rare, and indistinguishable from the sentinel, so it costs one
+        measurement. An asymmetric sentinel needs no rule -- ``-1`` against any
+        real credit price is a crossed book, which is already refused below.
+        """
+        bid = _finite(getattr(ticker, "bid", None))
+        ask = _finite(getattr(ticker, "ask", None))
+        if bid is None or ask is None or ask < bid:
+            return None
+        if bid == NO_DATA and ask == NO_DATA:
+            return None
+        return ComboQuote(wire_bid=_price(bid), wire_ask=_price(ask))
 
     @staticmethod
     def _describe_leg(leg: OptionLeg) -> str:
@@ -1295,7 +1418,13 @@ class IBKRMarketData:
                 try:
                     tickers = []
                     for contract in batch:
-                        tickers.append(ib.reqMktData(contract, generic_ticks, False, False))
+                        ticker = ib.reqMktData(contract, generic_ticks, False, False)
+                        # The vendor may hand back a ticker it cached under this
+                        # contract's conId, still carrying an earlier
+                        # subscription's values. Clear it so "present" means
+                        # "arrived for this observation".
+                        self._clear_stale(ticker)
+                        tickers.append(ticker)
                         opened.append(contract)
                     self._await_quotes(ib, tickers, self._completeness(generic_ticks))
                     collected.extend(tickers)
@@ -1313,6 +1442,36 @@ class IBKRMarketData:
             logger.exception("Market data request failed for %d contracts", len(contracts))
             raise MarketDataError(f"Cannot obtain market data: {exc}") from exc
         return collected
+
+    @staticmethod
+    def _clear_stale(ticker: Any) -> None:
+        """Blank the fields a previous subscription may have left behind.
+
+        NaN rather than ``None`` for the numbers, because that is what the
+        vendor's own ``Ticker`` starts life with and what :func:`_finite` and
+        :func:`_count` are already written to read as "not sent yet". ``None``
+        for the greek objects, matching an un-subscribed ticker.
+
+        Sizes are cleared too, and not for anything this module reads: the
+        vendor's ``tickSize`` handler short-circuits when the incoming size
+        equals the stored one, so a stale ``bidSize`` can suppress the very
+        update that would have corrected a stale ``bid``.
+
+        Best-effort by design. A double that does not carry one of these
+        attributes is not an error, and a vendor object that refuses the write
+        must not take down a scan -- the cost of failing to clear is a stale
+        reading, which is what the rest of the pipeline already guards against.
+        """
+        for name in STALE_TICKER_VALUES:
+            try:
+                setattr(ticker, name, math.nan)
+            except AttributeError:
+                logger.debug("could not clear %s on %r", name, ticker)
+        for name in STALE_TICKER_GREEKS:
+            try:
+                setattr(ticker, name, None)
+            except AttributeError:
+                logger.debug("could not clear %s on %r", name, ticker)
 
     def _await_quotes(
         self,
@@ -1412,11 +1571,30 @@ class IBKRMarketData:
 
     @staticmethod
     def _has_market(ticker: Any) -> bool:
-        """True when both sides of this ticker's book have arrived."""
-        return (
-            _finite(getattr(ticker, "bid", None)) is not None
-            and _finite(getattr(ticker, "ask", None)) is not None
-        )
+        """True when both sides of this ticker's book have arrived.
+
+        ``-1`` is not a price. ``ib_async`` writes ``Defaults.emptyPrice``,
+        which is ``-1`` rather than NaN, for a side that arrives with size 0,
+        and a size-only tick of 0 erases the standing price the same way. Since
+        :func:`_finite` rejects only None, NaN and Inf, that sentinel used to
+        read as a present book -- so a contract with *no* market satisfied this
+        predicate, :meth:`_await_quotes` returned without pumping, and
+        :meth:`_quote_batches` cancelled the line before a real quote could
+        arrive. :meth:`_two_sided` then rejected the same ticker on ``bid < 0``,
+        which is why this never surfaced as a bad fill: it surfaced as a quiet
+        market.
+
+        Unlike :meth:`_combo_quote`, which must admit negative prices because a
+        credit spread's bag quotes negative and so can only refuse the
+        symmetric ``-1 x -1``, a single option or stock can never be quoted
+        below zero. Either side at the sentinel means that side has not
+        arrived.
+        """
+        bid = _finite(getattr(ticker, "bid", None))
+        ask = _finite(getattr(ticker, "ask", None))
+        if bid is None or ask is None:
+            return False
+        return bid != NO_DATA and ask != NO_DATA
 
     @classmethod
     def _has_option_market(cls, ticker: Any) -> bool:

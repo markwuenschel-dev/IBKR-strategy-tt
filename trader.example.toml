@@ -85,7 +85,8 @@ strike_window_iv_multiple = 1.2
 # NOTE: IBKR does not deliver open interest under frozen/delayed market data.
 # If you run with market_data_type = 2/3/4, min_open_interest = 100 will screen
 # out every contract and you will see NO_TRADE on liquidity for every symbol.
-max_spread_pct = 0.10
+# No bid/ask-width gate: width is a ranking preference and a reviewer input,
+# not a screen. See tastytrade._liquidity_failure.
 min_open_interest = 100
 min_volume = 0
 

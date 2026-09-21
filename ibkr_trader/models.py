@@ -118,15 +118,17 @@ class Quoted:
     def spread_pct(self) -> float:
         """Bid/ask spread as a fraction of mid; infinite when mid is zero.
 
-        This is the liquidity screen: a wide relative spread means the fill will
-        be poor no matter how attractive the theoretical credit looks.
+        A liquidity *preference*, not a screen: ``ranking`` orders candidates by
+        the mean of this across their legs, and it reaches the reviewer in the
+        leg payload. Nothing rejects on it -- see
+        ``tastytrade._liquidity_failure`` for why that gate was removed.
 
-        Infinity is deliberate and load-bearing. ``tastytrade`` tests
-        ``spread_pct > max_spread_pct``, so a dead book must compare *greater*
-        than any configured bound and be rejected. ``None`` would raise inside
-        the pure algorithm and zero would read as a perfectly tight market. The
-        wire needs a JSON-safe value instead, and :func:`leg_payload` is the one
-        place that converts -- a serialization rule, not a second arithmetic.
+        Infinity is deliberate. A zero mid has no meaningful ratio, and zero
+        would read as a perfectly tight market -- the best possible rank -- for
+        a book nobody is quoting. ``None`` would raise inside the pure
+        algorithm. The wire needs a JSON-safe value instead, and
+        :func:`leg_payload` is the one place that converts -- a serialization
+        rule, not a second arithmetic.
         """
         mid = self.mid
         if mid <= 0:
@@ -147,6 +149,50 @@ class OptionQuote(Quoted):
     delta: float
     open_interest: int
     volume: int
+
+
+@dataclass(frozen=True, slots=True)
+class ComboQuote:
+    """The spread's own market, as the venue quotes the ``BAG`` itself.
+
+    Deliberately not a :class:`Quoted`: the sign convention is the wire's, not
+    the domain's. ``wire_bid``/``wire_ask`` are prices *paid* for the bag, so a
+    credit spread quotes negative on both sides -- exactly the convention
+    ``broker._build_order`` negates into. Inheriting ``mid`` and ``spread_pct``
+    would hand out a midpoint whose sign silently disagreed with every credit
+    in the codebase, which is the one mistake worth structurally preventing.
+
+    The derived properties below are the domain's view, all credit-positive.
+
+    Why this exists at all: leg arithmetic (short bid minus long ask, and so
+    on) is a *proxy* for the spread's market. The bag has its own book and its
+    own price-improvement auction, and until 2026-09-17 nothing here had ever
+    asked what it was.
+    """
+
+    wire_bid: Decimal
+    wire_ask: Decimal
+
+    @property
+    def marketable_credit(self) -> Decimal:
+        """The credit obtainable right now by crossing.
+
+        Our bag always goes out as a ``BUY`` (``broker._combo_action``), so
+        immediate execution means paying ``wire_ask``; negated, that is the
+        credit we would collect. This is the number a limit must reach to be
+        marketable -- not a fill probability, a bound.
+        """
+        return -self.wire_ask
+
+    @property
+    def credit_mid(self) -> Decimal:
+        """Midpoint of the bag's own book, in credit terms."""
+        return -(self.wire_bid + self.wire_ask) / Decimal(2)
+
+    @property
+    def width(self) -> Decimal:
+        """Absolute bid/ask width of the bag's book. Sign-free, so unnegated."""
+        return self.wire_ask - self.wire_bid
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +488,24 @@ class ComboOrder:
     @property
     def is_credit(self) -> bool:
         return self.limit_price > 0
+
+
+def opening_combo_legs(proposal: TradeProposal) -> tuple[ComboLeg, ...]:
+    """The legs of the opening order for ``proposal``, in the proposal's order.
+
+    One definition, three callers: the broker builds the order from it, the
+    manager rebuilds the same legs when it needs them, and the runner quotes
+    the bag it is about to submit. A second, parallel spelling of this is how a
+    quote ends up describing a different spread from the order.
+    """
+    return tuple(
+        ComboLeg(
+            OptionLeg(proposal.symbol, leg.expiry, leg.strike, leg.right),
+            leg.action,
+            leg.ratio,
+        )
+        for leg in proposal.legs
+    )
 
 
 class SpreadStatus(str, Enum):

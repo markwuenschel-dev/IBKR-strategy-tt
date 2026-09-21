@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
+from .bag import bag_contract
 from .clock import Clock
 from .config import IBKRConfig
 from .errors import (
@@ -45,7 +46,6 @@ from .errors import (
 from .models import (
     CONTRACT_MULTIPLIER,
     Action,
-    ComboLeg,
     ComboOrder,
     ExecutionResult,
     Fill,
@@ -53,6 +53,7 @@ from .models import (
     Outcome,
     Tif,
     TradeProposal,
+    opening_combo_legs,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,16 +165,6 @@ def _load_api() -> IBApi:
     return ib_async
 
 
-def _combo_leg_action(leg_action: Action) -> str:
-    """Render one leg's action for the wire.
-
-    The bag is always bought, so every leg executes exactly as written and this
-    is an identity mapping. It exists as a named function so the guarantee is
-    stated in one place rather than implied by an inline attribute access.
-    """
-    return leg_action.value
-
-
 def _opening_order(proposal: TradeProposal) -> ComboOrder:
     """The opening ``ComboOrder`` a reviewed proposal is transmitted as.
 
@@ -185,19 +176,7 @@ def _opening_order(proposal: TradeProposal) -> ComboOrder:
     """
     return ComboOrder(
         symbol=proposal.symbol,
-        legs=tuple(
-            ComboLeg(
-                leg=OptionLeg(
-                    symbol=proposal.symbol,
-                    expiry=leg.expiry,
-                    strike=leg.strike,
-                    right=leg.right,
-                ),
-                action=leg.action,
-                ratio=leg.ratio,
-            )
-            for leg in proposal.legs
-        ),
+        legs=opening_combo_legs(proposal),
         quantity=proposal.quantity,
         limit_price=proposal.limit_price,
         tif=Tif.DAY,
@@ -686,31 +665,16 @@ class IBKRBroker:
                 f"{order.symbol} ({order.order_ref})"
             )
 
-        combo_legs = []
-        for combo_leg, contract in zip(order.legs, qualified, strict=True):
-            con_id = getattr(contract, "conId", 0) if contract is not None else 0
-            if not con_id:
-                leg = combo_leg.leg
-                raise SubmissionFailed(
-                    f"IBKR could not resolve {leg.symbol} {leg.expiry} "
-                    f"{leg.strike} {leg.right.value} ({order.order_ref})"
-                )
-            combo_legs.append(
-                api.ComboLeg(
-                    conId=int(con_id),
-                    ratio=combo_leg.ratio,
-                    action=_combo_leg_action(combo_leg.action),
-                    exchange=_EXCHANGE,
-                )
-            )
-
-        return api.Contract(
-            secType="BAG",
-            symbol=order.symbol,
-            exchange=_EXCHANGE,
-            currency=_CURRENCY,
-            comboLegs=combo_legs,
-        )
+        con_ids = [
+            int(getattr(contract, "conId", 0) or 0) if contract is not None else 0
+            for contract in qualified
+        ]
+        try:
+            return bag_contract(api, order.symbol, order.legs, con_ids, _EXCHANGE, _CURRENCY)
+        except ValueError as exc:
+            # The shared builder refuses an unresolved leg; here that refusal
+            # means nothing is transmitted, which is what SubmissionFailed says.
+            raise SubmissionFailed(f"{exc} ({order.order_ref})") from exc
 
     def _build_option(self, api: IBApi, leg: OptionLeg) -> Any:
         """One leg as an unqualified ``Option`` contract."""

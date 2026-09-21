@@ -65,6 +65,7 @@ from .models import (
     SymbolResult,
     Tif,
     TradeProposal,
+    opening_combo_legs,
 )
 from .ports import Broker, MarketData, Reviewer, Store
 from .tastytrade import TICK
@@ -138,6 +139,8 @@ class ManagementSummary:
         """The operator summary, one line per kind that occurred."""
         labels = (
             (ManagementKind.RECONCILED_FILL, "Fills reconciled"),
+            (ManagementKind.OPENING_WORKING, "Openings still resting"),
+            (ManagementKind.OPENING_UNFILLED, "Openings never filled"),
             (ManagementKind.PROFIT_TARGET_PLACED, "Profit targets placed"),
             (ManagementKind.PROFIT_TARGET_FILLED, "Profit targets filled"),
             (ManagementKind.PROFIT_TARGET_CANCELLED, "Profit targets cancelled"),
@@ -331,7 +334,7 @@ class Manager:
                     opening.symbol,
                     ManagementKind.OPENING_WORKING,
                     f"{opening.quantity}x {legs} resting at {opening.limit_price} "
-                    f"for {resting:.1f}h, not filled",
+                    f"for {resting:.1f}h, not filled; {self._combo_market(opening)}",
                     spread_id=opening.proposal_id,
                 )
             )
@@ -348,6 +351,35 @@ class Manager:
                 detail,
                 spread_id=opening.proposal_id,
             )
+        )
+
+    def _combo_market(self, opening: OpeningOrder) -> str:
+        """Where the bag is quoted right now, against our resting limit.
+
+        The measurement the 2026-09-17 session could not make. An order resting
+        unfilled is only diagnosable against the spread's own book: leg
+        arithmetic said that day's limit sat at the midpoint while the order
+        sat untouched for two hours, and no record could distinguish "priced
+        just outside the market" from "nowhere near it".
+
+        Every failure degrades to a phrase rather than an exception. This runs
+        inside the reconciliation loop of a management pass whose real job is
+        working the book; a venue that will not quote a bag must cost this
+        sentence and nothing else.
+        """
+        try:
+            quote = self._market_data.quote_combo(opening.symbol, _opening_order_legs(opening))
+        except Exception:  # noqa: BLE001 - a measurement must not break the pass
+            log.warning("could not quote the resting bag for %s", opening.symbol)
+            return "bag not quotable"
+
+        if quote is None:
+            return "bag not quoted by the venue"
+
+        marketable = quote.marketable_credit
+        return (
+            f"bag {marketable} to {-quote.wire_bid} credit, mid {quote.credit_mid}, "
+            f"{opening.limit_price - marketable} above the marketable credit"
         )
 
     def _reconcile(
@@ -1036,6 +1068,25 @@ def _strays(held: Mapping[OptionLeg, int], managed: set[OptionLeg]) -> dict[str,
     return strays
 
 
+def _opening_order_legs(opening: OpeningOrder) -> tuple[ComboLeg, ...]:
+    """The legs of a resting opening order, rebuilt from the durable record.
+
+    Puts, because that is the only spread this engine opens -- the same
+    assumption :attr:`Spread.short_leg` makes, and for the same reason: the
+    store records strikes and an expiry, not rights.
+    """
+    return (
+        ComboLeg(
+            OptionLeg(opening.symbol, opening.expiry, opening.short_strike, Right.PUT),
+            Action.SELL,
+        ),
+        ComboLeg(
+            OptionLeg(opening.symbol, opening.expiry, opening.long_strike, Right.PUT),
+            Action.BUY,
+        ),
+    )
+
+
 def _closing_legs(spread: Spread) -> tuple[ComboLeg, ...]:
     """Buy back the short put, sell the long put: the mirror of the opening."""
     return (
@@ -1045,10 +1096,13 @@ def _closing_legs(spread: Spread) -> tuple[ComboLeg, ...]:
 
 
 def _opening_legs(proposal: TradeProposal) -> tuple[ComboLeg, ...]:
-    return tuple(
-        ComboLeg(OptionLeg(proposal.symbol, leg.expiry, leg.strike, leg.right), leg.action)
-        for leg in proposal.legs
-    )
+    """The roll's opening legs -- the same construction the broker transmits.
+
+    Delegated rather than spelled out again: this module and ``broker`` both
+    build an opening from a proposal, and two spellings of that is how a quote
+    and an order end up describing different spreads.
+    """
+    return opening_combo_legs(proposal)
 
 
 def _strike(proposal: TradeProposal, action: Action) -> Decimal:

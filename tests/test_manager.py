@@ -27,6 +27,7 @@ from ibkr_trader.models import (
     Action,
     ComboLeg,
     ComboOrder,
+    ComboQuote,
     ExecutionResult,
     Fill,
     ManagementKind,
@@ -977,3 +978,90 @@ def test_manage_once_refuses_without_a_verified_account(tmp_path):
 
     assert store.runs() == []
     assert broker.placed == []
+
+
+# --- 9. the resting order's own market ---------------------------------------
+
+
+def test_a_resting_order_is_reported_against_the_bag_s_own_market(tmp_path):
+    """The measurement the 2026-09-17 session could not make.
+
+    That day an order rested two hours at a limit leg arithmetic called the
+    midpoint, and the record could not say whether it was a cent outside the
+    market or a quarter. The spread's own book is the only thing that answers
+    that, so the resting line carries it.
+    """
+    clock = FixedClock(SCAN_TIME)
+    market = StubMarketData(
+        combo_quotes={
+            # A credit spread quotes negative on the wire: these are prices
+            # *paid* for the bag, so crossing collects 1.55.
+            "AAPL": ComboQuote(wire_bid=Decimal("-1.85"), wire_ask=Decimal("-1.55"))
+        }
+    )
+    manager, _, _, broker, store = build_manager(tmp_path, market=market, clock=clock)
+    store.record(
+        SymbolResult(
+            "AAPL",
+            Outcome.WORKING,
+            "",
+            opening_proposal(),
+            execution=ExecutionResult(Outcome.WORKING, "open-1"),
+        ),
+        RUN,
+    )
+    broker.working_refs = {"open-1"}
+
+    summary = manager.run(RUN)
+
+    (action,) = summary.actions
+    assert action.kind is ManagementKind.OPENING_WORKING
+    assert "bag 1.55 to 1.85 credit" in action.detail
+    assert "mid 1.70" in action.detail
+    # Our limit is 1.75; crossing would collect 1.55, so we sit 0.20 above it.
+    assert "0.20 above the marketable credit" in action.detail
+
+    # The bag asked about is the spread that is actually resting.
+    (symbol, legs) = market.combo_quoted[0]
+    assert symbol == "AAPL"
+    assert [(leg.leg.strike, leg.action) for leg in legs] == [
+        (Decimal("185"), Action.SELL),
+        (Decimal("180"), Action.BUY),
+    ]
+
+
+def test_a_bag_that_cannot_be_quoted_costs_the_measurement_and_nothing_else(tmp_path):
+    """Instrumentation must never break the pass that carries it."""
+    clock = FixedClock(SCAN_TIME)
+    market = StubMarketData(combo_quote_error=MarketDataError("no market data line"))
+    manager, _, _, broker, store = build_manager(tmp_path, market=market, clock=clock)
+    store.record(
+        SymbolResult(
+            "AAPL",
+            Outcome.WORKING,
+            "",
+            opening_proposal(),
+            execution=ExecutionResult(Outcome.WORKING, "open-1"),
+        ),
+        RUN,
+    )
+    broker.working_refs = {"open-1"}
+
+    summary = manager.run(RUN)
+
+    (action,) = summary.actions
+    assert action.kind is ManagementKind.OPENING_WORKING
+    assert "bag not quotable" in action.detail
+    assert "resting at 1.75" in action.detail, "the rest of the line survives"
+
+
+def test_a_resting_opening_reaches_the_operator_summary(tmp_path):
+    """Both opening kinds were absent from the label table, so they rendered as
+    a bare 'Managed: 1 spread(s)' line with nothing saying what happened."""
+    clock = FixedClock(SCAN_TIME)
+    manager, broker, store = _unfilled_opening(tmp_path, clock)
+    broker.working_refs = {"open-1"}
+
+    rendered = manager.run(RUN).render()
+
+    assert "Openings still resting: 1" in rendered

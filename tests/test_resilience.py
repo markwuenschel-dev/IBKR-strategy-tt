@@ -64,7 +64,7 @@ def test_illiquid_chain_is_a_no_trade_not_an_error(tmp_path):
     summary = runner.run_once()
 
     assert summary.results[0].outcome is Outcome.NO_TRADE
-    assert "spread" in summary.results[0].detail
+    assert "open interest" in summary.results[0].detail
     assert reviewer.call_count == 0
     assert broker.call_count == 0
     assert summary.errors == 0
